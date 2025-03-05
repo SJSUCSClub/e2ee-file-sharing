@@ -6,7 +6,7 @@ use axum::{
     Router,
 };
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     let app = Router::new()
         .route("/api/v1/register", post(api::register))
