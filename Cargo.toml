@@ -1,2 +1,3 @@
 [workspace]
-members = ["server", "client/src-tauri"]
+resolver = "3"
+members = ["corelib", "server", "client/src-tauri"]
