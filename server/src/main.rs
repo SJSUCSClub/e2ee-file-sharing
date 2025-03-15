@@ -1,13 +1,16 @@
 mod api;
+mod db;
 mod page;
 
 use axum::{
-    routing::{get, post},
     Router,
+    routing::{get, post},
 };
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    db::init_db().expect("Failed to create db");
+
     let app = Router::new()
         .route("/api/v1/register", post(api::register))
         .route("/api/v1/login", post(api::login))
