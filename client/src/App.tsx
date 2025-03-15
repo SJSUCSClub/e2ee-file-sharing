@@ -1,6 +1,5 @@
-import { useState } from "preact/hooks";
-import preactLogo from "./assets/preact.svg";
 import { invoke } from "@tauri-apps/api/core";
+import { useState } from "preact/hooks";
 import "./App.css";
 
 function App() {
@@ -13,24 +12,11 @@ function App() {
   }
 
   return (
-    <main class="container">
-      <h1>Welcome to Tauri + Preact</h1>
-
-      <div class="row">
-        <a href="https://vitejs.dev" target="_blank">
-          <img src="/vite.svg" class="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" class="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://preactjs.com" target="_blank">
-          <img src={preactLogo} class="logo preact" alt="Preact logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and Preact logos to learn more.</p>
+    <main class="flex flex-col items-center justify-center w-screen h-screen">
+      <h1 className="text-2xl">ACM E2EE File Sharing</h1>
 
       <form
-        class="row"
+        className="flex flex-row gap-2"
         onSubmit={(e) => {
           e.preventDefault();
           greet();
