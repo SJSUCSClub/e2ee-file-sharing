@@ -1,8 +1,12 @@
 use rusqlite::{Connection, Result};
-const DB_NAME: &str = "e2ee-file-sharing.db";
 
-pub fn init_db() -> Result<()> {
-    let conn = Connection::open(DB_NAME)?;
+/// initialize all expected tables within a database connection
+///
+/// has no side effects if these tables already exist
+///
+/// NOTE: will not update an existing table, so in the case of a migration
+/// simply changing the schema within this function will not migrate existing tables
+pub fn init_db(conn: &Connection) -> Result<()> {
     let sql = "
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
