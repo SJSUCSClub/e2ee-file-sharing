@@ -31,3 +31,76 @@ pub fn init_db(conn: &Connection) -> Result<()> {
     );";
     conn.execute_batch(sql)
 }
+
+pub fn get_files_for_user_id(conn: &Connection, user_id: i32) -> Result<Vec<String>> {
+    let query = "
+        SELECT f.filename
+        From files f
+        JOIN groups_user_junction guj on f.group_id = guj.group_id
+        WHERE guj.user_id = ?;
+    ";
+
+    let mut statement = conn.prepare(query).expect("unable to prepare query");
+
+    statement
+        .query_map([user_id], |row| row.get::<usize, String>(0))?
+        .collect::<Result<Vec<String>>>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn setup_test_db(conn: &Connection) {
+        init_db(&conn).unwrap();
+
+        // create fake records
+        conn.execute(
+            "INSERT INTO users (key_hash, pk_pub) VALUES (X'00', X'00');",
+            [],
+        )
+        .expect("Failed to insert user");
+
+        conn.execute(
+            "INSERT INTO groups (id) VALUES (NULL);", 
+            [],
+        )
+        .expect("Failed to insert group");
+
+        conn.execute(
+            "INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 1, 'group_name', X'00');",
+            [],
+        )
+        .expect("Failed to insert group user junction");
+
+        conn.execute(
+            "INSERT INTO files (group_id, filename, path) VALUES (1, 'test_file.txt', '/path/to/test_file.txt');",
+            [],
+        )
+        .expect("Failed to insert file");
+
+        }
+
+    #[test]
+    fn test_get_files_for_user() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_test_db(&conn);
+
+        let user_id = 1;
+        let result = get_files_for_user_id(&conn, user_id).unwrap();
+
+        assert_eq!(result, vec!["test_file.txt"]);
+    }
+
+    #[test]
+    fn test_get_files_for_nonexisting_user(){
+        let conn = Connection::open_in_memory().unwrap();
+        setup_test_db(&conn);
+
+        let user_id = 1000; // does not exist in the testing db
+        let result = get_files_for_user_id(&conn, user_id).unwrap();
+
+        assert_eq!(result, Vec::<String>::new());
+    }
+}
