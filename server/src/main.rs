@@ -7,9 +7,14 @@ use axum::{
     routing::{get, post},
 };
 
+use rusqlite::Connection;
+
+const DB_NAME: &str = "e2ee-file-sharing.db";
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    db::init_db().expect("Failed to create db");
+    let conn = Connection::open(DB_NAME).expect("unable to open database");
+    db::init_db(&conn).expect("Failed to create db");
 
     let app = Router::new()
         .route("/api/v1/register", post(api::register))
