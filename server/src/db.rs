@@ -32,9 +32,12 @@ pub fn init_db(conn: &Connection) -> Result<()> {
     conn.execute_batch(sql)
 }
 
-pub fn get_files_for_user_id(conn: &Connection, user_id: i32) -> Result<Vec<String>> {
+pub fn get_files_for_user_id(
+    conn: &Connection,
+    user_id: i32,
+) -> Result<Vec<(String, i32, String, i32)>> {
     let query = "
-        SELECT f.filename
+        SELECT f.filename, f.file_id, guj.name, guj.group_id
         From files f
         JOIN groups_user_junction guj on f.group_id = guj.group_id
         WHERE guj.user_id = ?;
@@ -43,8 +46,15 @@ pub fn get_files_for_user_id(conn: &Connection, user_id: i32) -> Result<Vec<Stri
     let mut statement = conn.prepare(query).expect("unable to prepare query");
 
     statement
-        .query_map([user_id], |row| row.get::<usize, String>(0))?
-        .collect::<Result<Vec<String>>>()
+        .query_map([user_id], |row| {
+            Ok((
+                row.get::<usize, String>(0)?,
+                row.get::<usize, i32>(1)?,
+                row.get::<usize, String>(2)?,
+                row.get::<usize, i32>(3)?,
+            ))
+        })?
+        .collect()
 }
 
 #[cfg(test)]
@@ -62,11 +72,8 @@ mod tests {
         )
         .expect("Failed to insert user");
 
-        conn.execute(
-            "INSERT INTO groups (id) VALUES (NULL);", 
-            [],
-        )
-        .expect("Failed to insert group");
+        conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
+            .expect("Failed to insert group");
 
         conn.execute(
             "INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 1, 'group_name', X'00');",
@@ -79,8 +86,7 @@ mod tests {
             [],
         )
         .expect("Failed to insert file");
-
-        }
+    }
 
     #[test]
     fn test_get_files_for_user() {
@@ -90,17 +96,20 @@ mod tests {
         let user_id = 1;
         let result = get_files_for_user_id(&conn, user_id).unwrap();
 
-        assert_eq!(result, vec!["test_file.txt"]);
+        assert_eq!(
+            result,
+            vec![("test_file.txt".to_string(), 1, "group_name".to_string(), 1)]
+        );
     }
 
     #[test]
-    fn test_get_files_for_nonexisting_user(){
+    fn test_get_files_for_nonexisting_user() {
         let conn = Connection::open_in_memory().unwrap();
         setup_test_db(&conn);
 
         let user_id = 1000; // does not exist in the testing db
         let result = get_files_for_user_id(&conn, user_id).unwrap();
 
-        assert_eq!(result, Vec::<String>::new());
+        assert_eq!(result, Vec::<(String, i32, String, i32)>::new());
     }
 }
