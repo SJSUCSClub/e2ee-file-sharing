@@ -38,8 +38,9 @@ pub fn get_files_for_user_id(
 ) -> Result<Vec<(String, i32, String, i32)>> {
     let query = "
         SELECT f.filename, f.file_id, guj.name, guj.group_id
-        From files f
-        JOIN groups_user_junction guj on f.group_id = guj.group_id
+        FROM files f
+        JOIN groups_user_junction guj 
+            ON f.group_id = guj.group_id
         WHERE guj.user_id = ?;
     ";
 
