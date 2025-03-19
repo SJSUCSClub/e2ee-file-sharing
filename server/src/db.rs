@@ -1,3 +1,4 @@
+pub const DB_NAME: &str = "e2ee-file-sharing.db";
 use rusqlite::{Connection, Result};
 
 /// initialize all expected tables within a database connection
@@ -10,6 +11,7 @@ pub fn init_db(conn: &Connection) -> Result<()> {
     let sql = "
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+        email TEXT NOT NULL,
         key_hash BLOB NOT NULL,
         pk_pub BLOB NOT NULL
     );
@@ -34,8 +36,8 @@ pub fn init_db(conn: &Connection) -> Result<()> {
 
 pub fn get_files_for_user_id(
     conn: &Connection,
-    user_id: i32,
-) -> Result<Vec<(String, i32, String, i32)>> {
+    user_id: i64,
+) -> Result<Vec<(String, i64, String, i64)>> {
     let query = "
         SELECT f.filename, f.file_id, guj.name, guj.group_id
         FROM files f
@@ -50,13 +52,35 @@ pub fn get_files_for_user_id(
         .query_map([user_id], |row| {
             Ok((
                 row.get::<usize, String>(0)?,
-                row.get::<usize, i32>(1)?,
+                row.get::<usize, i64>(1)?,
                 row.get::<usize, String>(2)?,
-                row.get::<usize, i32>(3)?,
+                row.get::<usize, i64>(3)?,
             ))
         })?
         .collect()
 }
+
+pub fn get_user_id(conn: &Connection, user_email: &str, user_password_hash: &str) -> Result<i64> {
+    let query = "
+        SELECT id FROM users WHERE email = ? AND key_hash = ?;
+    ";
+
+    let mut statement = conn.prepare(query).expect("unable to prepare query");
+    statement.query_row([user_email, user_password_hash], |row| row.get(0))
+}
+
+pub fn get_file_path(conn: &Connection, file_id: i64) -> Result<String> {
+    let query = "
+        SELECT path FROM files WHERE file_id = ?;
+    ";
+    // TODO - optimize so that we don't prepare the same query each time
+    let mut statement = conn
+        .prepare(query)
+        .expect("Failed to prepare get path query");
+    statement.query_row([file_id], |row| row.get(0))
+}
+
+// TODO post specific file
 
 #[cfg(test)]
 mod tests {
@@ -111,6 +135,6 @@ mod tests {
         let user_id = 1000; // does not exist in the testing db
         let result = get_files_for_user_id(&conn, user_id).unwrap();
 
-        assert_eq!(result, Vec::<(String, i32, String, i32)>::new());
+        assert_eq!(result, Vec::<(String, i64, String, i64)>::new());
     }
 }

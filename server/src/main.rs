@@ -2,6 +2,10 @@ mod api;
 mod db;
 mod page;
 
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+use api::HandlerState;
 use axum::{
     Router,
     routing::{get, post},
@@ -9,17 +13,18 @@ use axum::{
 
 use rusqlite::Connection;
 
-const DB_NAME: &str = "e2ee-file-sharing.db";
-
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let conn = Connection::open(DB_NAME).expect("unable to open database");
-    db::init_db(&conn).expect("Failed to create db");
+    let conn = Connection::open(db::DB_NAME).expect("Failed to open db");
+    db::init_db(&conn).expect("Failed to init db");
 
     let app = Router::new()
-        .route("/api/v1/register", post(api::register))
-        .route("/api/v1/login", post(api::login))
-        .route("/", get(page::index_html));
+        .route("/api/v1/list-files", get(api::list_files))
+        .route("/api/v1/file", get(api::get_file))
+        .route("/", get(page::index_html))
+        .with_state(HandlerState {
+            conn: Arc::new(Mutex::new(conn)),
+        });
 
     let bind_addr = std::env::var("EFS_SERVER_LISTEN").unwrap_or("127.0.0.0:8091".to_string());
 
