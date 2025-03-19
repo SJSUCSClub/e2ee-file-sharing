@@ -21,6 +21,7 @@ async fn main() {
     let app = Router::new()
         .route("/api/v1/list-files", get(api::list_files))
         .route("/api/v1/file", get(api::get_file))
+        .route("/api/v1/file", post(api::upload_file))
         .route("/", get(page::index_html))
         .with_state(HandlerState {
             conn: Arc::new(Mutex::new(conn)),

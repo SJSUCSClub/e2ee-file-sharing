@@ -28,8 +28,7 @@ pub fn init_db(conn: &Connection) -> Result<()> {
     CREATE TABLE IF NOT EXISTS files (
         group_id INTEGER NOT NULL REFERENCES groups(id),
         file_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-        filename TEXT NOT NULL,
-        path TEXT NOT NULL
+        filename TEXT NOT NULL
     );";
     conn.execute_batch(sql)
 }
@@ -69,18 +68,21 @@ pub fn get_user_id(conn: &Connection, user_email: &str, user_password_hash: &str
     statement.query_row([user_email, user_password_hash], |row| row.get(0))
 }
 
-pub fn get_file_path(conn: &Connection, file_id: i64) -> Result<String> {
-    let query = "
-        SELECT path FROM files WHERE file_id = ?;
+pub fn insert_file(conn: &Connection, group_id: i64, filename: &str) -> Result<i64> {
+    let sql = "
+        INSERT INTO files (group_id, filename) VALUES (?, ?)
+        RETURNING file_id;
     ";
-    // TODO - optimize so that we don't prepare the same query each time
-    let mut statement = conn
-        .prepare(query)
-        .expect("Failed to prepare get path query");
-    statement.query_row([file_id], |row| row.get(0))
+    let mut statement = conn.prepare(sql).unwrap();
+    statement.query_row((group_id, filename), |row| row.get::<usize, i64>(0))
 }
-
-// TODO post specific file
+pub fn get_filename(conn: &Connection, file_id: i64) -> Result<String> {
+    let sql = "
+        SELECT filename FROM files WHERE file_id = ?;
+    ";
+    let mut statement = conn.prepare(sql).unwrap();
+    statement.query_row([file_id], |row| row.get::<usize, String>(0))
+}
 
 #[cfg(test)]
 mod tests {

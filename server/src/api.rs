@@ -1,17 +1,23 @@
 use axum::{
+    Json,
     body::Body,
-    extract::{Query, State},
+    extract::{Multipart, Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 
 use rusqlite::Connection;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::io::ReaderStream;
 
-use crate::db::{get_file_path, get_user_id};
+use crate::db::{get_filename, get_files_for_user_id, get_user_id, insert_file};
+const UPLOAD_DIRECTORY: &str = "/uploads";
+
+fn to_path(file_id: i64) -> String {
+    format!("{UPLOAD_DIRECTORY}/{file_id}")
+}
 
 #[derive(Clone)]
 pub(crate) struct HandlerState {
@@ -31,7 +37,7 @@ pub(crate) struct ListFilesQueryParams {
     user_password_hash: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Debug)]
 pub(crate) struct ListFilesItem {
     file_name: String,
     file_id: i64,
@@ -39,7 +45,7 @@ pub(crate) struct ListFilesItem {
     group_id: i64,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Debug)]
 pub(crate) struct ListFilesResponse {
     files: Vec<ListFilesItem>,
 }
@@ -54,7 +60,38 @@ pub(crate) async fn list_files(
 ) -> impl IntoResponse {
     println!("Params are {params:?}");
     // so now return query
-    // TODO - make connection, get user id, get files
+
+    // authenticate the user
+    let conn = &st.conn.lock().await;
+    let user_id = match get_user_id(conn, &params.user_email, &params.user_password_hash) {
+        Ok(user_id) => user_id,
+        Err(e) => {
+            println!("Bad user: {e:?}");
+            return (StatusCode::BAD_REQUEST, "User email and password mismatch").into_response();
+        }
+    };
+
+    // now get all files that match this user id
+    let files_vec = match get_files_for_user_id(conn, user_id) {
+        Ok(files) => files,
+        Err(e) => {
+            println!("Error getting files: {e:?}!");
+            return (StatusCode::BAD_REQUEST, "Failed to get files!").into_response();
+        }
+    };
+
+    // return the files, as proper response
+    let files = files_vec
+        .iter()
+        .map(|(file_name, file_id, group_name, group_id)| ListFilesItem {
+            file_name: file_name.clone(),
+            file_id: *file_id,
+            group_name: group_name.clone(),
+            group_id: *group_id,
+        })
+        .collect();
+    let response = ListFilesResponse { files };
+    (StatusCode::OK, Json(response)).into_response()
 }
 
 #[derive(Deserialize, Debug)]
@@ -79,21 +116,22 @@ pub(crate) async fn get_file(
     }
 
     // authentication succeeded, proceed to get the file storage location
-    let path = match get_file_path(conn, params.file_id) {
-        Ok(path) => path,
-
+    // and the file name
+    let file_name = match get_filename(conn, params.file_id) {
+        Ok(file_name) => file_name,
         Err(e) => {
-            println!("Error getting file path: {e:?}!");
-            return (StatusCode::BAD_REQUEST, "Invalid file ID").into_response();
+            println!("Failed to get filename {e:?}");
+            return (StatusCode::BAD_REQUEST, "Failed to get filename").into_response();
         }
     };
+    let path = to_path(params.file_id);
 
     // open file
     let file = match tokio::fs::File::open(path).await {
         Ok(file) => file,
         Err(e) => {
             println!("Error opening file: {e:?}!");
-            return (StatusCode::BAD_REQUEST, "Failed to open file!").into_response();
+            return (StatusCode::BAD_REQUEST, "Failed to open file").into_response();
         }
     };
 
@@ -104,7 +142,7 @@ pub(crate) async fn get_file(
         // TODO - does writing somefile.txt actually matter?
         (
             header::CONTENT_DISPOSITION,
-            "attachment; filename=\"somefile.txt\"",
+            &format!("attachment; filename={file_name}"),
         ),
     ];
 
@@ -112,24 +150,53 @@ pub(crate) async fn get_file(
 }
 
 #[derive(Deserialize, Debug)]
-struct UploadFileQueryParams {
-    file_id: i64,
+pub(crate) struct UploadFileQueryParams {
     group_id: i64,
     user_email: String,
     user_password_hash: String,
 }
 
-/*
+#[axum::debug_handler]
 pub(crate) async fn upload_file(
     Query(params): Query<UploadFileQueryParams>,
+    State(st): State<HandlerState>,
     mut multipart: Multipart,
-) -> impl IntoResponse {
-    while let (mut field) = multipart.next_field().await.unwrap() {
+) -> Response {
+    {
+        // do this in a block to avoid mutex overlap when doing next_field
+        let conn = &st.conn.lock().await;
+
+        // authenticate user
+        if let Err(e) = get_user_id(conn, &params.user_email, &params.user_password_hash) {
+            println!("Unauthorized user! {e:?}");
+            return (StatusCode::UNAUTHORIZED, "User email and password mismatch").into_response();
+        }
+    }
+    while let Some(field) = multipart.next_field().await.unwrap() {
         let name = field.name().unwrap().to_string();
         let file_name = field.file_name().unwrap().to_string();
         let content_type = field.content_type().unwrap().to_string();
         let data = field.bytes().await.unwrap();
 
-        // TODO
+        // insert into DB
+        let conn = &st.conn.lock().await;
+        let file_id = match insert_file(conn, params.group_id, &file_name) {
+            Ok(file_id) => file_id,
+            Err(e) => {
+                println!("Failed to insert file with {e:?}");
+                return (StatusCode::BAD_REQUEST, "Failed to insert file").into_response();
+            }
+        };
+
+        // write that to a file
+        // since files are uniquely identified by their file id, then we
+        // can simply save as the file id
+        // and later fetch files by their file_id
+        let path = format!("{UPLOAD_DIRECTORY}/{file_id}");
+        if let Err(e) = tokio::fs::write(path, data).await {
+            println!("Failed to save file with {e:?}");
+            return (StatusCode::BAD_REQUEST, "Failed to save file").into_response();
+        }
     }
-}*/
+    (StatusCode::BAD_REQUEST, "No file body provided").into_response()
+}
