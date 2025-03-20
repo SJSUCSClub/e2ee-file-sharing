@@ -54,12 +54,11 @@ pub(crate) struct ListFilesResponse {
 // would stream data instead of just using
 // multipart/form-data because this would
 // allow easy handling of large files.
+// curl http://127.0.0.0:8091/api/v1/list-files?user_email=email@test.org&user_password_hash=0033FF -X GET
 pub(crate) async fn list_files(
     Query(params): Query<ListFilesQueryParams>,
     State(st): State<HandlerState>,
 ) -> impl IntoResponse {
-    // so now return query
-
     // authenticate the user
     let conn = &st.conn.lock().await;
     let user_id = match get_user_id(conn, &params.user_email, &params.user_password_hash) {
@@ -80,6 +79,7 @@ pub(crate) async fn list_files(
     };
 
     // return the files, as proper response
+    println!("Files: {files_vec:?} and user_id: {user_id}");
     let files = files_vec
         .iter()
         .map(|(file_name, file_id, group_name, group_id)| ListFilesItem {
@@ -100,6 +100,8 @@ pub(crate) struct GetFileQueryParams {
     user_password_hash: String,
 }
 
+// example curl command
+// curl http://127.0.0.0:8091/api/v1/file?file_id=4&user_email=user@test.org&user_password_hash=02FA3B -X GET
 pub(crate) async fn get_file(
     Query(params): Query<GetFileQueryParams>,
     State(st): State<HandlerState>,
@@ -151,7 +153,13 @@ pub(crate) struct UploadFileQueryParams {
     user_email: String,
     user_password_hash: String,
 }
+#[derive(Serialize, Debug)]
+pub(crate) struct UploadFileResponse {
+    file_id: i64,
+}
 
+// example curl command
+// curl http://127.0.0.0:8091/api/v1/file?group_id=1&user_email=email@test.org&user_password_hash=0033FF -X POST -H "Content-Type: multipart/form-data" -F fi=@file.txt
 pub(crate) async fn upload_file(
     Query(params): Query<UploadFileQueryParams>,
     State(st): State<HandlerState>,
@@ -189,6 +197,8 @@ pub(crate) async fn upload_file(
         if let Err(e) = tokio::fs::write(path, data).await {
             println!("Failed to save file with {e:?}");
             return (StatusCode::BAD_REQUEST, "Failed to save file").into_response();
+        } else {
+            return (StatusCode::OK, Json(UploadFileResponse { file_id })).into_response();
         }
     }
     (StatusCode::BAD_REQUEST, "No file body provided").into_response()
