@@ -232,22 +232,20 @@ mod tests {
         assert_eq!(result2, 2);
     }
     #[test]
-    #[should_panic]
     fn test_get_user_id_mismatch_hash() {
         let conn = Connection::open_in_memory().unwrap();
         setup_test_db(&conn);
 
         // get user id for nonexistent person
-        get_user_id(&conn, "test@test.com", "01").unwrap();
+        assert!(get_user_id(&conn, "test@test.com", "01").is_err());
     }
     #[test]
-    #[should_panic]
     fn test_get_user_id_mismatch_email() {
         let conn = Connection::open_in_memory().unwrap();
         setup_test_db(&conn);
 
         // get user id for nonexistent person
-        get_user_id(&conn, "nest@test.com", "00").unwrap();
+        assert!(get_user_id(&conn, "nest@test.com", "00").is_err());
     }
     #[test]
     fn test_insert_file() {
@@ -264,12 +262,11 @@ mod tests {
         assert_eq!(file_id, 4);
     }
     #[test]
-    #[should_panic]
     fn test_insert_file_nonexistent_group_id() {
         let conn = Connection::open_in_memory().unwrap();
         setup_test_db(&conn);
 
-        insert_file(&conn, 2, "test_file.txt").unwrap();
+        assert!(insert_file(&conn, 2, "test_file.txt").is_err());
     }
     #[test]
     fn test_get_filename() {
@@ -290,13 +287,12 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
     fn test_get_filename_nonexistent() {
         let conn = Connection::open_in_memory().unwrap();
         setup_test_db(&conn);
 
         // get nonexistent
-        get_filename(&conn, 2).unwrap();
+        assert!(get_filename(&conn, 2).is_err());
     }
 
     #[test]

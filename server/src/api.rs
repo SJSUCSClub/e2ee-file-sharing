@@ -3,7 +3,7 @@ use axum::{
     body::Body,
     extract::{Multipart, Query, Request, State},
     http::{StatusCode, header},
-    middleware::Next,
+    middleware::{self, Next},
     response::{IntoResponse, Response},
 };
 
@@ -20,10 +20,8 @@ use crate::db::{get_filename, get_files_for_user_id, get_user_id, insert_file};
 // ==============================
 // Upload Directory
 // ==============================
-const UPLOAD_DIRECTORY: &str = "/uploads";
-
-fn to_path(file_id: i64) -> String {
-    format!("{UPLOAD_DIRECTORY}/{file_id}")
+fn to_path(upload_directory: &str, file_id: i64) -> String {
+    format!("{upload_directory}/{file_id}")
 }
 
 // ==============================
@@ -35,6 +33,7 @@ pub(crate) struct HandlerState {
     // readers and writers, and there can be multiple readers
     // at the same time, but only one writer at a time
     pub tx: Sender<DatabaseCommand>,
+    pub upload_directory: String,
 }
 
 // task thread that manages a connection
@@ -134,12 +133,20 @@ pub(crate) async fn user_auth(
         .insert(UserAuthExtension { user_id });
     next.run(request).await
 }
+// helper function that way we don't have to write .layer
+// on every authenticated endpoint
+pub(crate) fn authenticated(
+    state: &HandlerState,
+    a: axum::routing::MethodRouter<HandlerState>,
+) -> axum::routing::MethodRouter<HandlerState> {
+    a.layer(middleware::from_fn_with_state(state.clone(), user_auth))
+}
 
 // ==============================
 // FILES endpoints
 // ==============================
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub(crate) struct ListFilesItem {
     file_name: String,
     file_id: i64,
@@ -147,7 +154,7 @@ pub(crate) struct ListFilesItem {
     group_id: i64,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub(crate) struct ListFilesResponse {
     files: Vec<ListFilesItem>,
 }
@@ -223,7 +230,7 @@ pub(crate) async fn get_file(
             return (StatusCode::BAD_REQUEST, "Failed to get filename").into_response();
         }
     };
-    let path = to_path(params.file_id);
+    let path = to_path(&st.upload_directory, params.file_id);
 
     // open file
     let file = match tokio::fs::File::open(path).await {
@@ -251,7 +258,7 @@ pub(crate) async fn get_file(
 pub(crate) struct UploadFileQueryParams {
     group_id: i64,
 }
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct UploadFileResponse {
     file_id: i64,
 }
@@ -291,7 +298,7 @@ pub(crate) async fn upload_file(
         // since files are uniquely identified by their file id, then we
         // can simply save as the file id
         // and later fetch files by their file_id
-        let path = format!("{UPLOAD_DIRECTORY}/{file_id}");
+        let path = to_path(&st.upload_directory, file_id);
         if let Err(e) = tokio::fs::write(path, data).await {
             println!("Failed to save file with {e:?}");
             return (StatusCode::BAD_REQUEST, "Failed to save file").into_response();
@@ -300,4 +307,291 @@ pub(crate) async fn upload_file(
         }
     }
     (StatusCode::BAD_REQUEST, "No file body provided").into_response()
+}
+
+pub(crate) async fn hello() -> &'static str {
+    "This is the ACM E2E file sharing server instance."
+}
+
+#[cfg(test)]
+mod tests {
+    use std::vec;
+
+    use axum::{
+        Router,
+        http::Request,
+        routing::{get, post},
+    };
+    use http_body_util::BodyExt; // for .collect() for the response
+    use tower::{Service, ServiceExt}; // for .oneshot
+
+    use crate::db;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_hello() {
+        let app = Router::new().route("/", get(hello));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .method("GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            &body[..],
+            b"This is the ACM E2E file sharing server instance."
+        );
+    }
+
+    #[tokio::test]
+    async fn test_auth() {
+        // setup
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_db(&conn).unwrap();
+        // and add an initial user
+        conn.execute("INSERT INTO users (email, key_hash, pk_pub) VALUES ('test@test.com', X'3F2A33', X'00');", []).unwrap();
+        // initialize state
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let state = HandlerState {
+            tx,
+            upload_directory: "".to_string(),
+        };
+        tokio::spawn(connection_task(conn, rx));
+
+        // build app
+        let mut app = Router::new()
+            .route("/", authenticated(&state, get(hello)))
+            .with_state(state);
+
+        // try properly authenticated request
+        let request = Request::builder()
+            .uri("/?user_email=test@test.com&user_password_hash=3F2A33")
+            .method("GET")
+            .body(Body::empty())
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            &body[..],
+            b"This is the ACM E2E file sharing server instance."
+        );
+
+        // and try improperly authenticated requests
+        let request = Request::builder()
+            .uri("/?user_email=wrongemail@test.com&user_password_hash=3F2A33")
+            .method("GET")
+            .body(Body::empty())
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"User email and password mismatch");
+
+        let request = Request::builder()
+            .uri("/?user_email=test@test.com&user_password_hash=3F2A3322")
+            .method("GET")
+            .body(Body::empty())
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"User email and password mismatch");
+    }
+
+    #[tokio::test]
+    async fn test_list_files() {
+        // setup
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_db(&conn).unwrap();
+        // and add an initial user and such
+        conn.execute("INSERT INTO users (email, key_hash, pk_pub) VALUES ('test@test.com', X'3F2A33', X'00');", []).unwrap();
+        conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
+            .unwrap();
+        conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 1, 'group_name', X'00');", []).unwrap();
+        conn.execute(
+            "INSERT INTO files (group_id, filename) VALUES (1, 'test_file.txt');",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO files (group_id, filename) VALUES (1, 'test_file2.txt');",
+            [],
+        )
+        .unwrap();
+        // initialize state
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let state = HandlerState {
+            tx,
+            upload_directory: "".to_string(),
+        };
+        tokio::spawn(connection_task(conn, rx));
+
+        // build app
+        let mut app = Router::new()
+            .route("/", authenticated(&state, get(list_files)))
+            .with_state(state);
+
+        // try properly authenticated request
+        let request = Request::builder()
+            .uri("/?user_email=test@test.com&user_password_hash=3F2A33")
+            .method("GET")
+            .body(Body::empty())
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: ListFilesResponse = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(
+            body.files,
+            vec![
+                ListFilesItem {
+                    file_id: 1,
+                    file_name: "test_file.txt".to_string(),
+                    group_name: "group_name".to_string(),
+                    group_id: 1
+                },
+                ListFilesItem {
+                    file_id: 2,
+                    file_name: "test_file2.txt".to_string(),
+                    group_name: "group_name".to_string(),
+                    group_id: 1
+                }
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_file() {
+        // setup
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_db(&conn).unwrap();
+        let upload_directory = "/tmp/upload-e2e-test";
+        tokio::fs::create_dir_all(upload_directory).await.unwrap();
+        // and add an initial user and such
+        conn.execute("INSERT INTO users (email, key_hash, pk_pub) VALUES ('test@test.com', X'3F2A33', X'00');", []).unwrap();
+        conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO files (group_id, filename) VALUES (1, 'test_file.txt');",
+            [],
+        )
+        .unwrap();
+        tokio::fs::write(to_path(upload_directory, 1), "HI THERE")
+            .await
+            .unwrap();
+        // initialize state
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let state = HandlerState {
+            tx,
+            upload_directory: upload_directory.to_string(),
+        };
+        tokio::spawn(connection_task(conn, rx));
+
+        // build app
+        let mut app = Router::new()
+            .route("/", authenticated(&state, get(get_file)))
+            .with_state(state);
+
+        // try properly authenticated request
+        let request = Request::builder()
+            .uri("/?user_email=test@test.com&user_password_hash=3F2A33&file_id=1")
+            .method("GET")
+            .body(Body::empty())
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+
+        assert_eq!(&body[..], b"HI THERE");
+        tokio::fs::remove_dir_all(upload_directory).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_upload_file() {
+        // setup
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_db(&conn).unwrap();
+        let upload_directory = "/tmp/upload-e2e-test-upload";
+        tokio::fs::create_dir_all(upload_directory).await.unwrap();
+        // and add an initial user and such
+        conn.execute("INSERT INTO users (email, key_hash, pk_pub) VALUES ('test@test.com', X'3F2A33', X'00');", []).unwrap();
+        conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
+            .unwrap();
+        // initialize state
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let state = HandlerState {
+            tx,
+            upload_directory: upload_directory.to_string(),
+        };
+        tokio::spawn(connection_task(conn, rx));
+
+        // build app
+        let mut app = Router::new()
+            .route("/", authenticated(&state, post(upload_file)))
+            .with_state(state);
+
+        // try properly authenticated request
+        // make request body
+        let data = "--MYBOUNDARY\r\nContent-Disposition: form-data; name=\"test\"; filename=\"test.txt\"\r\nContent-Type: text/plain\r\n\r\nHELLO WORLD\r\n--MYBOUNDARY\r\n";
+        let request = Request::builder()
+            .uri("/?user_email=test@test.com&user_password_hash=3F2A33&group_id=1")
+            .method("POST")
+            .header(
+                header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={}", "MYBOUNDARY"),
+            )
+            .body(Body::from(data))
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: UploadFileResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.file_id, 1);
+        let contents = tokio::fs::read_to_string(to_path(upload_directory, 1))
+            .await
+            .unwrap();
+        assert_eq!(contents, "HELLO WORLD");
+        tokio::fs::remove_dir_all(upload_directory).await.unwrap();
+    }
 }
