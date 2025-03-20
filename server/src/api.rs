@@ -58,7 +58,6 @@ pub(crate) async fn list_files(
     Query(params): Query<ListFilesQueryParams>,
     State(st): State<HandlerState>,
 ) -> impl IntoResponse {
-    println!("Params are {params:?}");
     // so now return query
 
     // authenticate the user
@@ -97,12 +96,10 @@ pub(crate) async fn list_files(
 #[derive(Deserialize, Debug)]
 pub(crate) struct GetFileQueryParams {
     file_id: i64,
-    group_id: i64,
     user_email: String,
     user_password_hash: String,
 }
 
-#[axum::debug_handler]
 pub(crate) async fn get_file(
     Query(params): Query<GetFileQueryParams>,
     State(st): State<HandlerState>,
@@ -139,7 +136,6 @@ pub(crate) async fn get_file(
     let body = Body::from_stream(ReaderStream::new(file));
     let headers = [
         (header::CONTENT_TYPE, "application/octet-stream"),
-        // TODO - does writing somefile.txt actually matter?
         (
             header::CONTENT_DISPOSITION,
             &format!("attachment; filename={file_name}"),
@@ -156,7 +152,6 @@ pub(crate) struct UploadFileQueryParams {
     user_password_hash: String,
 }
 
-#[axum::debug_handler]
 pub(crate) async fn upload_file(
     Query(params): Query<UploadFileQueryParams>,
     State(st): State<HandlerState>,
@@ -173,9 +168,7 @@ pub(crate) async fn upload_file(
         }
     }
     while let Some(field) = multipart.next_field().await.unwrap() {
-        let name = field.name().unwrap().to_string();
         let file_name = field.file_name().unwrap().to_string();
-        let content_type = field.content_type().unwrap().to_string();
         let data = field.bytes().await.unwrap();
 
         // insert into DB
