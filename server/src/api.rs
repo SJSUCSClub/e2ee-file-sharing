@@ -1,8 +1,9 @@
 use axum::{
-    Json,
+    Extension, Json,
     body::Body,
-    extract::{Multipart, Query, State},
+    extract::{Multipart, Query, Request, State},
     http::{StatusCode, header},
+    middleware::Next,
     response::{IntoResponse, Response},
 };
 
@@ -28,14 +29,45 @@ pub(crate) struct HandlerState {
 }
 
 // ==============================
-// FILES endpoints
+// Middleware
 // ==============================
-
 #[derive(Deserialize, Debug)]
-pub(crate) struct ListFilesQueryParams {
+pub(crate) struct UserAuth {
     user_email: String,
     user_password_hash: String,
 }
+#[derive(Clone, Debug)]
+pub(crate) struct UserAuthExtension {
+    user_id: i64,
+}
+pub(crate) async fn user_auth(
+    State(st): State<HandlerState>,
+    Query(params): Query<UserAuth>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    // double check that user is authenticated
+    let user_id;
+    {
+        let conn = &st.conn.lock().await;
+        user_id = match get_user_id(conn, &params.user_email, &params.user_password_hash) {
+            Ok(user_id) => user_id,
+            Err(e) => {
+                println!("Failed to authenticate user with {e:?}");
+                return (StatusCode::UNAUTHORIZED, "User email and password mismatch")
+                    .into_response();
+            }
+        };
+    }
+    request
+        .extensions_mut()
+        .insert(UserAuthExtension { user_id });
+    next.run(request).await
+}
+
+// ==============================
+// FILES endpoints
+// ==============================
 
 #[derive(Serialize, Debug)]
 pub(crate) struct ListFilesItem {
@@ -56,20 +88,12 @@ pub(crate) struct ListFilesResponse {
 // allow easy handling of large files.
 // curl http://127.0.0.0:8091/api/v1/list-files?user_email=email@test.org&user_password_hash=0033FF -X GET
 pub(crate) async fn list_files(
-    Query(params): Query<ListFilesQueryParams>,
     State(st): State<HandlerState>,
+    Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
 ) -> impl IntoResponse {
-    // authenticate the user
     let conn = &st.conn.lock().await;
-    let user_id = match get_user_id(conn, &params.user_email, &params.user_password_hash) {
-        Ok(user_id) => user_id,
-        Err(e) => {
-            println!("Bad user: {e:?}");
-            return (StatusCode::BAD_REQUEST, "User email and password mismatch").into_response();
-        }
-    };
 
-    // now get all files that match this user id
+    // get all files that match this user id
     let files_vec = match get_files_for_user_id(conn, user_id) {
         Ok(files) => files,
         Err(e) => {
@@ -96,8 +120,6 @@ pub(crate) async fn list_files(
 #[derive(Deserialize, Debug)]
 pub(crate) struct GetFileQueryParams {
     file_id: i64,
-    user_email: String,
-    user_password_hash: String,
 }
 
 // example curl command
@@ -107,12 +129,6 @@ pub(crate) async fn get_file(
     State(st): State<HandlerState>,
 ) -> Response {
     let conn = &st.conn.lock().await;
-
-    // authenticate the user
-    if let Err(e) = get_user_id(conn, &params.user_email, &params.user_password_hash) {
-        println!("Bad user: {e:?}");
-        return (StatusCode::BAD_REQUEST, "User email and password mismatch").into_response();
-    }
 
     // authentication succeeded, proceed to get the file storage location
     // and the file name
@@ -150,8 +166,6 @@ pub(crate) async fn get_file(
 #[derive(Deserialize, Debug)]
 pub(crate) struct UploadFileQueryParams {
     group_id: i64,
-    user_email: String,
-    user_password_hash: String,
 }
 #[derive(Serialize, Debug)]
 pub(crate) struct UploadFileResponse {
@@ -165,16 +179,6 @@ pub(crate) async fn upload_file(
     State(st): State<HandlerState>,
     mut multipart: Multipart,
 ) -> Response {
-    {
-        // do this in a block to avoid mutex overlap when doing next_field
-        let conn = &st.conn.lock().await;
-
-        // authenticate user
-        if let Err(e) = get_user_id(conn, &params.user_email, &params.user_password_hash) {
-            println!("Unauthorized user! {e:?}");
-            return (StatusCode::UNAUTHORIZED, "User email and password mismatch").into_response();
-        }
-    }
     while let Some(field) = multipart.next_field().await.unwrap() {
         let file_name = field.file_name().unwrap().to_string();
         let data = field.bytes().await.unwrap();
