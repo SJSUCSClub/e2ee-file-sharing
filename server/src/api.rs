@@ -9,23 +9,87 @@ use axum::{
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{
+    mpsc::{self, Sender},
+    oneshot,
+};
 use tokio_util::io::ReaderStream;
 
 use crate::db::{get_filename, get_files_for_user_id, get_user_id, insert_file};
+
+// ==============================
+// Upload Directory
+// ==============================
 const UPLOAD_DIRECTORY: &str = "/uploads";
 
 fn to_path(file_id: i64) -> String {
     format!("{UPLOAD_DIRECTORY}/{file_id}")
 }
 
+// ==============================
+// State / Connection Thread
+// ==============================
 #[derive(Clone)]
 pub(crate) struct HandlerState {
     // TODO - differentiate between the fact that we have
     // readers and writers, and there can be multiple readers
     // at the same time, but only one writer at a time
-    pub conn: Arc<Mutex<Connection>>,
+    pub tx: Sender<DatabaseCommand>,
+}
+
+// task thread that manages a connection
+pub(crate) enum DatabaseCommand {
+    GetUserId {
+        user_email: String,
+        user_password_hash: String,
+        responder: oneshot::Sender<rusqlite::Result<i64>>,
+    },
+    GetFilesForUserId {
+        user_id: i64,
+        responder: oneshot::Sender<rusqlite::Result<Vec<(String, i64, String, i64)>>>,
+    },
+    GetFilename {
+        file_id: i64,
+        responder: oneshot::Sender<rusqlite::Result<String>>,
+    },
+    InsertFile {
+        group_id: i64,
+        filename: String,
+        responder: oneshot::Sender<rusqlite::Result<i64>>,
+    },
+}
+pub(crate) async fn connection_task(conn: Connection, mut rx: mpsc::Receiver<DatabaseCommand>) {
+    use DatabaseCommand::*;
+    while let Some(cmd) = rx.recv().await {
+        match cmd {
+            GetUserId {
+                user_email,
+                user_password_hash,
+                responder,
+            } => {
+                responder
+                    .send(get_user_id(&conn, &user_email, &user_password_hash))
+                    .unwrap();
+            }
+            GetFilesForUserId { user_id, responder } => {
+                responder
+                    .send(get_files_for_user_id(&conn, user_id))
+                    .unwrap();
+            }
+            GetFilename { file_id, responder } => {
+                responder.send(get_filename(&conn, file_id)).unwrap();
+            }
+            InsertFile {
+                group_id,
+                filename,
+                responder,
+            } => {
+                responder
+                    .send(insert_file(&conn, group_id, &filename))
+                    .unwrap();
+            }
+        }
+    }
 }
 
 // ==============================
@@ -46,19 +110,25 @@ pub(crate) async fn user_auth(
     mut request: Request,
     next: Next,
 ) -> Response {
-    // double check that user is authenticated
-    let user_id;
-    {
-        let conn = &st.conn.lock().await;
-        user_id = match get_user_id(conn, &params.user_email, &params.user_password_hash) {
-            Ok(user_id) => user_id,
-            Err(e) => {
-                println!("Failed to authenticate user with {e:?}");
-                return (StatusCode::UNAUTHORIZED, "User email and password mismatch")
-                    .into_response();
-            }
-        };
-    }
+    // send request
+    let (tx, rx) = oneshot::channel();
+    st.tx
+        .send(DatabaseCommand::GetUserId {
+            user_email: params.user_email,
+            user_password_hash: params.user_password_hash,
+            responder: tx,
+        })
+        .await
+        .unwrap();
+    // and double check
+    let user_id = match rx.await.unwrap() {
+        Ok(user_id) => user_id,
+        Err(e) => {
+            println!("Failed to authenticate user with {e:?}");
+            return (StatusCode::UNAUTHORIZED, "User email and password mismatch").into_response();
+        }
+    };
+
     request
         .extensions_mut()
         .insert(UserAuthExtension { user_id });
@@ -91,10 +161,17 @@ pub(crate) async fn list_files(
     State(st): State<HandlerState>,
     Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
 ) -> impl IntoResponse {
-    let conn = &st.conn.lock().await;
-
+    // initialize/send request
+    let (tx, rx) = oneshot::channel();
+    st.tx
+        .send(DatabaseCommand::GetFilesForUserId {
+            user_id: user_id,
+            responder: tx,
+        })
+        .await
+        .unwrap();
     // get all files that match this user id
-    let files_vec = match get_files_for_user_id(conn, user_id) {
+    let files_vec = match rx.await.unwrap() {
         Ok(files) => files,
         Err(e) => {
             println!("Error getting files: {e:?}!");
@@ -103,7 +180,6 @@ pub(crate) async fn list_files(
     };
 
     // return the files, as proper response
-    println!("Files: {files_vec:?} and user_id: {user_id}");
     let files = files_vec
         .iter()
         .map(|(file_name, file_id, group_name, group_id)| ListFilesItem {
@@ -128,11 +204,19 @@ pub(crate) async fn get_file(
     Query(params): Query<GetFileQueryParams>,
     State(st): State<HandlerState>,
 ) -> Response {
-    let conn = &st.conn.lock().await;
-
     // authentication succeeded, proceed to get the file storage location
+    // first, initialize request to the connection thread
+    let (tx, rx) = oneshot::channel();
+    st.tx
+        .send(DatabaseCommand::GetFilename {
+            file_id: params.file_id,
+            responder: tx,
+        })
+        .await
+        .unwrap();
+
     // and the file name
-    let file_name = match get_filename(conn, params.file_id) {
+    let file_name = match rx.await.unwrap() {
         Ok(file_name) => file_name,
         Err(e) => {
             println!("Failed to get filename {e:?}");
@@ -184,8 +268,18 @@ pub(crate) async fn upload_file(
         let data = field.bytes().await.unwrap();
 
         // insert into DB
-        let conn = &st.conn.lock().await;
-        let file_id = match insert_file(conn, params.group_id, &file_name) {
+        // first, initialize channel to connection thread
+        let (tx, rx) = oneshot::channel();
+        st.tx
+            .send(DatabaseCommand::InsertFile {
+                group_id: params.group_id,
+                filename: file_name,
+                responder: tx,
+            })
+            .await
+            .unwrap();
+        // then match result
+        let file_id = match rx.await.unwrap() {
             Ok(file_id) => file_id,
             Err(e) => {
                 println!("Failed to insert file with {e:?}");

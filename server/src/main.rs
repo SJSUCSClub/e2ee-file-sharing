@@ -2,10 +2,7 @@ mod api;
 mod db;
 mod page;
 
-use std::sync::Arc;
-use tokio::sync::Mutex;
-
-use api::HandlerState;
+use api::{HandlerState, connection_task};
 use axum::{
     Router, middleware,
     routing::{get, post},
@@ -13,13 +10,13 @@ use axum::{
 
 use rusqlite::Connection;
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() {
     let conn = Connection::open(db::DB_NAME).expect("Failed to open db");
     db::init_db(&conn).expect("Failed to init db");
-    let state = HandlerState {
-        conn: Arc::new(Mutex::new(conn)),
-    };
+    let (tx, rx) = tokio::sync::mpsc::channel(32);
+    let state = HandlerState { tx };
+    let _ = tokio::spawn(connection_task(conn, rx));
 
     let app = Router::new()
         .route("/api/v1/list-files", get(api::list_files))
