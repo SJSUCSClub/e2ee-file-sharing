@@ -1,11 +1,14 @@
 use aes_gcm::{
     Aes256Gcm, Key,
-    aead::{AeadCore, AeadInPlace, KeyInit},
+    aead::{Aead, AeadCore, AeadInPlace, KeyInit},
 };
 use argon2::{Algorithm, Argon2, Params, Version};
 use rand::rngs::OsRng;
-use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey};
 use rsa::pkcs8::{DecodePublicKey, EncodePublicKey};
+use rsa::{
+    Pkcs1v15Encrypt,
+    pkcs8::{DecodePrivateKey, EncodePrivateKey},
+};
 use rsa::{RsaPrivateKey, RsaPublicKey, pkcs8};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, digest::generic_array::GenericArray};
@@ -87,6 +90,17 @@ impl PkKeyPair {
             pkpriv: priv_key,
         }
     }
+
+    /// Decrypts a group key with the private key of the user.
+    pub fn get_group_key(&self, group_key_encrypted: &[u8]) -> GroupKey {
+        // decrypt the encrypted group key with the private key
+        GroupKey {
+            key: self
+                .pkpriv
+                .decrypt(Pkcs1v15Encrypt, group_key_encrypted)
+                .expect("Failed to decrypt key"),
+        }
+    }
 }
 
 /// On-disk storage format.
@@ -135,5 +149,57 @@ impl DiskKeys {
             pkpub: DecodePublicKey::from_public_key_pem(&self.pk_pub).unwrap(),
             pkpriv: DecodePrivateKey::from_pkcs8_pem(&String::from_utf8(buffer).unwrap()).unwrap(),
         }
+    }
+}
+
+// In-memory only
+pub struct GroupKey {
+    key: Vec<u8>,
+}
+// wifi transport and storage on server disk
+#[derive(Serialize, Deserialize)]
+pub struct EncryptedFile {
+    pub nonce: Vec<u8>,
+    pub bytes: Vec<u8>,
+}
+impl GroupKey {
+    /// Encrypts the group key with the public keys of the recipients.
+    /// Returns a vector, where result[i] is the group key, encrypted for
+    /// the recipient whose public key is public_keys[i].
+    pub fn make_encrypted_group_keys(public_keys: &[RsaPublicKey]) -> Vec<Vec<u8>> {
+        let group_key = aes_gcm::Aes256Gcm::generate_key(aes_gcm::aead::OsRng);
+        let group_key = group_key.to_vec();
+
+        let mut rng = rand::thread_rng();
+        public_keys
+            .iter()
+            .map(|pk| {
+                pk.encrypt(&mut rng, Pkcs1v15Encrypt, &group_key[..])
+                    .expect("Failed to encrypt group key!")
+            })
+            .collect()
+    }
+
+    /// Encrypts a file using the group key
+    /// Returns the encrypted file and the nonce
+    pub fn encrypt_file(&self, bytes: &[u8]) -> EncryptedFile {
+        let cipher =
+            Aes256Gcm::new_from_slice(self.key.as_slice()).expect("Failed to init AES-GCM");
+        let nonce = Aes256Gcm::generate_nonce(OsRng);
+        let bytes = cipher.encrypt(&nonce, bytes).expect("Failed to encrypt");
+        EncryptedFile {
+            nonce: nonce.to_vec(),
+            bytes,
+        }
+    }
+    /// Decrypts a file using the group key and the nonce
+    /// Returns the decrypted bytes
+    pub fn decrypt_file(&self, encrypted_file: &EncryptedFile) -> Vec<u8> {
+        let cipher =
+            Aes256Gcm::new_from_slice(self.key.as_slice()).expect("Failed to init AES-GCM");
+        let nonce = GenericArray::from_slice(encrypted_file.nonce.as_slice());
+        cipher
+            .decrypt(&nonce, encrypted_file.bytes.as_slice())
+            .expect("Failed to decrypt file")
     }
 }
