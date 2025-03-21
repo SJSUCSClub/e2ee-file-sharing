@@ -1,26 +1,6 @@
 pub const DB_NAME: &str = "e2ee-file-sharing.db";
+use corelib::server::salt_password;
 use rusqlite::{Connection, Result, params};
-
-// converts a hex string to a byte array
-// e.g. "deadbeef" -> [0xde, 0xad, 0xbe, 0xef]
-// # Arguments
-// * `hex_string` - A string of hexadecimal characters
-// # Returns
-// A vector of bytes
-fn to_bytes(hex_string: &str) -> Vec<u8> {
-    let mut start = 0;
-    let mut result = Vec::new();
-    if (hex_string.len() - start) % 2 != 0 {
-        result.push(u8::from_str_radix(&hex_string[start..start + 1], 16).unwrap());
-        start += 1;
-    }
-    result.extend(
-        (start..hex_string.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&hex_string[i..i + 2], 16).unwrap()),
-    );
-    result
-}
 
 /// initialize all expected tables within a database connection
 ///
@@ -33,7 +13,8 @@ pub fn init_db(conn: &Connection) -> Result<()> {
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
         email TEXT NOT NULL,
-        key_hash BLOB NOT NULL,
+        password_hash BLOB NOT NULL,
+        salt BLOB NOT NULL,
         pk_pub BLOB NOT NULL
     );
     CREATE TABLE IF NOT EXISTS groups (
@@ -110,14 +91,25 @@ pub fn get_files_for_user_id(
 /// A `Result` containing the user ID as an `i64` if the user is found, or an
 /// error if the user cannot be authenticated.
 pub fn get_user_id(conn: &Connection, user_email: &str, user_password_hash: &str) -> Result<i64> {
+    // first, fetch the salt
     let query = "
-        SELECT id FROM users WHERE email = ? AND key_hash = ?;
+        SELECT salt FROM users WHERE email = ?;
     ";
+    let mut statement = conn.prepare(query).expect("Unable to prepare salt query");
+    let salt = statement.query_row(params![user_email], |row| row.get::<usize, Vec<u8>>(0))?;
 
+    // then attempt to fetch the matching id
+    let query = "
+        SELECT id FROM users WHERE email = ? AND password_hash = ?;
+    ";
     let mut statement = conn.prepare(query).expect("unable to prepare query");
-    statement.query_row(params![user_email, to_bytes(user_password_hash)], |row| {
-        row.get(0)
-    })
+    statement.query_row(
+        params![
+            user_email,
+            salt_password(user_password_hash, salt.as_slice())
+        ],
+        |row| row.get(0),
+    )
 }
 
 /// Inserts a file into the database.
@@ -160,15 +152,18 @@ pub fn get_filename(conn: &Connection, file_id: i64) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use corelib::server::make_salt;
     use rusqlite::Connection;
 
     fn setup_test_db(conn: &Connection) {
         init_db(&conn).unwrap();
 
         // create fake records
+        let salt = make_salt();
+        let password_hash = salt_password("00", &salt);
         conn.execute(
-            "INSERT INTO users (email, key_hash, pk_pub) VALUES ('test@test.com', X'00', X'00');",
-            [],
+            "INSERT INTO users (email, salt, password_hash, pk_pub) VALUES ('test@test.com', ?, ?, X'00');",
+            params![salt, password_hash],
         )
         .expect("Failed to insert user");
 
@@ -223,9 +218,11 @@ mod tests {
         assert_eq!(result, 1);
 
         // try with another
+        let salt = make_salt();
+        let password_hash = salt_password("AFF3", &salt);
         conn.execute(
-            "INSERT INTO users(email, key_hash, pk_pub) VALUES ('test2@test2.com', X'AFF3', X'00');",
-            [],
+            "INSERT INTO users(email, password_hash, salt, pk_pub) VALUES ('test2@test2.com', ?, ?, X'00');",
+            params![password_hash, salt],
         )
         .expect("Failed to execute insert");
         let result2 = get_user_id(&conn, "test2@test2.com", "AFF3").unwrap();
@@ -293,30 +290,5 @@ mod tests {
 
         // get nonexistent
         assert!(get_filename(&conn, 2).is_err());
-    }
-
-    #[test]
-    fn test_get_bytes() {
-        let s1 = "A3F0FF";
-        let b1 = to_bytes(s1);
-        assert_eq!(b1, [0xa3, 0xf0, 0xff]);
-
-        let s2 = "A3F0";
-        let b2 = to_bytes(s2);
-        assert_eq!(b2, [0xa3, 0xf0]);
-
-        // and try for odd length
-        let s3 = "AA3F0FF00";
-        let b3 = to_bytes(s3);
-        assert_eq!(b3, [0xa, 0xa3, 0xf0, 0xff, 0x00]);
-
-        // try for empty
-        let s3 = "";
-        let b3 = to_bytes(s3);
-        assert_eq!(b3.len(), 0);
-        // and try for one
-        let s3 = "a";
-        let b3 = to_bytes(s3);
-        assert_eq!(b3, [0xa]);
     }
 }

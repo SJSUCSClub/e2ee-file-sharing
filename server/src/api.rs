@@ -322,12 +322,15 @@ mod tests {
         http::Request,
         routing::{get, post},
     };
-    use http_body_util::BodyExt; // for .collect() for the response
+    use http_body_util::BodyExt;
+    use rusqlite::params;
+    // for .collect() for the response
     use tower::{Service, ServiceExt}; // for .oneshot
 
     use crate::db;
 
     use super::*;
+    use corelib::server::{make_salt, salt_password};
 
     #[tokio::test]
     async fn test_hello() {
@@ -358,7 +361,9 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         db::init_db(&conn).unwrap();
         // and add an initial user
-        conn.execute("INSERT INTO users (email, key_hash, pk_pub) VALUES ('test@test.com', X'3F2A33', X'00');", []).unwrap();
+        let salt = make_salt();
+        let password_hash = salt_password("3F2A33", &salt);
+        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![password_hash, salt]).unwrap();
         // initialize state
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let state = HandlerState {
@@ -429,7 +434,9 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         db::init_db(&conn).unwrap();
         // and add an initial user and such
-        conn.execute("INSERT INTO users (email, key_hash, pk_pub) VALUES ('test@test.com', X'3F2A33', X'00');", []).unwrap();
+        let salt = make_salt();
+        let password_hash = salt_password("3F2A33", &salt);
+        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![password_hash, salt]).unwrap();
         conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
             .unwrap();
         conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 1, 'group_name', X'00');", []).unwrap();
@@ -499,7 +506,9 @@ mod tests {
         let upload_directory = "/tmp/upload-e2e-test";
         tokio::fs::create_dir_all(upload_directory).await.unwrap();
         // and add an initial user and such
-        conn.execute("INSERT INTO users (email, key_hash, pk_pub) VALUES ('test@test.com', X'3F2A33', X'00');", []).unwrap();
+        let salt = make_salt();
+        let password_hash = salt_password("3F2A33", &salt);
+        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![password_hash, salt]).unwrap();
         conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
             .unwrap();
         conn.execute(
@@ -550,7 +559,9 @@ mod tests {
         let upload_directory = "/tmp/upload-e2e-test-upload";
         tokio::fs::create_dir_all(upload_directory).await.unwrap();
         // and add an initial user and such
-        conn.execute("INSERT INTO users (email, key_hash, pk_pub) VALUES ('test@test.com', X'3F2A33', X'00');", []).unwrap();
+        let salt = make_salt();
+        let password_hash = salt_password("3F2A33", &salt);
+        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![password_hash, salt]).unwrap();
         conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
             .unwrap();
         // initialize state
