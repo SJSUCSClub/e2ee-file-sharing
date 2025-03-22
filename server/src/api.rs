@@ -1,7 +1,7 @@
 use axum::{
     Extension, Json,
     body::Body,
-    extract::{Multipart, Query, Request, State},
+    extract::{Multipart, Path, Query, Request, State},
     http::{StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -15,13 +15,20 @@ use tokio::sync::{
 };
 use tokio_util::io::ReaderStream;
 
-use crate::db::{get_filename, get_files_for_user_id, get_user_id, insert_file};
+use crate::db::{
+    create_group as create_group_db, get_existing_users, get_filename, get_files_for_user_id,
+    get_group, get_group_id, get_group_key, get_groups_for_user_id, get_user_id, insert_file,
+};
 
 // ==============================
-// Upload Directory
+// Misc
 // ==============================
 fn to_path(upload_directory: &str, file_id: i64) -> String {
     format!("{upload_directory}/{file_id}")
+}
+
+pub(crate) async fn hello() -> &'static str {
+    "This is the ACM E2E file sharing server instance."
 }
 
 // ==============================
@@ -56,6 +63,31 @@ pub(crate) enum DatabaseCommand {
         filename: String,
         responder: oneshot::Sender<rusqlite::Result<i64>>,
     },
+    GetGroupById {
+        group_id: i64,
+        responder: oneshot::Sender<rusqlite::Result<Vec<(String, i64, Vec<u8>)>>>,
+    },
+    GetGroupKey {
+        group_id: i64,
+        user_id: i64,
+        responder: oneshot::Sender<rusqlite::Result<Vec<u8>>>,
+    },
+    GetGroupByMembers {
+        members: Vec<i64>,
+        responder: oneshot::Sender<rusqlite::Result<Option<i64>>>,
+    },
+    CreateGroup {
+        members: Vec<(i64, Vec<u8>)>,
+        responder: oneshot::Sender<rusqlite::Result<i64>>,
+    },
+    ListGroups {
+        user_id: i64,
+        responder: oneshot::Sender<rusqlite::Result<Vec<(i64, String)>>>,
+    },
+    GetExistingUsers {
+        users: Vec<(i64, String)>,
+        responder: oneshot::Sender<rusqlite::Result<Vec<(i64, String)>>>,
+    },
 }
 pub(crate) async fn connection_task(conn: Connection, mut rx: mpsc::Receiver<DatabaseCommand>) {
     use DatabaseCommand::*;
@@ -86,6 +118,35 @@ pub(crate) async fn connection_task(conn: Connection, mut rx: mpsc::Receiver<Dat
                 responder
                     .send(insert_file(&conn, group_id, &filename))
                     .unwrap();
+            }
+            GetGroupById {
+                group_id,
+                responder,
+            } => {
+                responder.send(get_group(&conn, group_id)).unwrap();
+            }
+            GetGroupKey {
+                group_id,
+                user_id,
+                responder,
+            } => {
+                responder
+                    .send(get_group_key(&conn, group_id, user_id))
+                    .unwrap();
+            }
+            GetGroupByMembers { members, responder } => {
+                responder.send(get_group_id(&conn, &members)).unwrap();
+            }
+            CreateGroup { members, responder } => {
+                responder.send(create_group_db(&conn, members)).unwrap();
+            }
+            ListGroups { user_id, responder } => {
+                responder
+                    .send(get_groups_for_user_id(&conn, user_id))
+                    .unwrap();
+            }
+            GetExistingUsers { users, responder } => {
+                responder.send(get_existing_users(&conn, users)).unwrap()
             }
         }
     }
@@ -309,9 +370,298 @@ pub(crate) async fn upload_file(
     (StatusCode::BAD_REQUEST, "No file body provided").into_response()
 }
 
-pub(crate) async fn hello() -> &'static str {
-    "This is the ACM E2E file sharing server instance."
+// ==============================
+// GROUPS endpoints
+// ==============================
+
+#[derive(Serialize, Debug)]
+pub(crate) struct GetGroupItem {
+    email: String,
+    user_id: i64,
+    pk_pub: Vec<u8>,
 }
+
+#[derive(Serialize, Debug)]
+pub(crate) struct GetGroupResponse {
+    members: Vec<GetGroupItem>,
+}
+
+pub(crate) async fn get_group_by_id(
+    Path(group_id): Path<i64>,
+    State(st): State<HandlerState>,
+    Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
+) -> impl IntoResponse {
+    // make database request
+    let (tx, rx) = oneshot::channel();
+    st.tx
+        .send(DatabaseCommand::GetGroupById {
+            group_id,
+            responder: tx,
+        })
+        .await
+        .unwrap();
+    let group_members = match rx.await.unwrap() {
+        Ok(group_members) => group_members,
+        Err(e) => {
+            println!("Failed to get group members with {e:?}");
+            return (StatusCode::BAD_REQUEST, "Failed to get group members").into_response();
+        }
+    };
+
+    // collect into proper format
+    let mut members = Vec::new();
+    for (email, user_id, pk_pub) in group_members {
+        members.push(GetGroupItem {
+            email,
+            user_id,
+            pk_pub,
+        });
+    }
+
+    // validate that the user is in the group before returning
+    if !members.iter().any(|member| member.user_id == user_id) {
+        return (StatusCode::UNAUTHORIZED, "User not present in group").into_response();
+    }
+    (StatusCode::OK, Json(GetGroupResponse { members })).into_response()
+}
+
+#[derive(Serialize, Debug)]
+pub(crate) struct GetGroupKeyResponse {
+    encrypted_key: Vec<u8>,
+}
+pub(crate) async fn get_group_key_by_id(
+    Path(group_id): Path<i64>,
+    State(st): State<HandlerState>,
+    Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
+) -> impl IntoResponse {
+    let (tx, rx) = oneshot::channel();
+    st.tx
+        .send(DatabaseCommand::GetGroupKey {
+            group_id: group_id,
+            user_id: user_id,
+            responder: tx,
+        })
+        .await
+        .unwrap();
+    let encrypted_key = match rx.await.unwrap() {
+        Ok(encrypted_key) => encrypted_key,
+        Err(e) => {
+            println!("Failed to get group key with {e:?}");
+            return (StatusCode::BAD_REQUEST, "Failed to get group key").into_response();
+        }
+    };
+
+    (StatusCode::OK, Json(GetGroupKeyResponse { encrypted_key })).into_response()
+}
+
+#[derive(Deserialize, Debug)]
+pub(crate) struct GetGroupByMembersItem {
+    email: String,
+    user_id: i64,
+}
+#[derive(Deserialize, Debug)]
+pub(crate) struct GetGroupByMembersQueryParams {
+    members: Vec<GetGroupByMembersItem>,
+}
+#[derive(Serialize, Debug)]
+pub(crate) struct GetGroupsByMembersREsponse {
+    group_id: i64,
+}
+pub(crate) async fn get_group_by_members(
+    Query(params): Query<GetGroupByMembersQueryParams>,
+    State(st): State<HandlerState>,
+    Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
+) -> impl IntoResponse {
+    // validate that all users exist
+    let (tx, rx) = oneshot::channel();
+    st.tx
+        .send(DatabaseCommand::GetExistingUsers {
+            users: params
+                .members
+                .iter()
+                .map(|m| (m.user_id, m.email.clone()))
+                .collect(),
+            responder: tx,
+        })
+        .await
+        .unwrap();
+    let existing_users = match rx.await.unwrap() {
+        Ok(existing_users) => existing_users,
+        Err(e) => {
+            println!("Failed to get existing users with {e:?}");
+            return (StatusCode::BAD_REQUEST, "Failed to get existing users").into_response();
+        }
+    };
+    if existing_users.len() != params.members.len() {
+        return (StatusCode::BAD_REQUEST, "Not all users exist").into_response();
+    }
+    // and that current user is present
+    if !existing_users.iter().any(|user| user.0 == user_id) {
+        return (StatusCode::UNAUTHORIZED, "User not present in group").into_response();
+    }
+
+    // send request to see if such a group exists
+    let (tx, rx) = oneshot::channel();
+    st.tx
+        .send(DatabaseCommand::GetGroupByMembers {
+            members: params.members.iter().map(|m| m.user_id).collect(),
+            responder: tx,
+        })
+        .await
+        .unwrap();
+    let group_id = match rx.await.unwrap() {
+        Ok(group_id) => group_id,
+        Err(e) => {
+            println!("Failed to get group by members with {e:?}");
+            return (StatusCode::BAD_REQUEST, "Failed to get group by members").into_response();
+        }
+    };
+
+    // return either the group id or a 404
+    match group_id {
+        Some(group_id) => (
+            StatusCode::OK,
+            Json(GetGroupsByMembersREsponse { group_id }),
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "No such group exists").into_response(),
+    }
+}
+
+#[derive(Deserialize, Debug)]
+pub(crate) struct CreateGroupItem {
+    user_id: i64,
+    email: String,
+    pk_pub: Vec<u8>,
+}
+#[derive(Deserialize, Debug)]
+pub(crate) struct CreateGroupQueryParams {
+    members: Vec<CreateGroupItem>,
+}
+#[derive(Serialize, Debug)]
+pub(crate) struct CreateGroupResponse {
+    group_id: i64,
+}
+pub(crate) async fn create_group(
+    State(st): State<HandlerState>,
+    Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
+    Json(body): Json<CreateGroupQueryParams>,
+) -> impl IntoResponse {
+    // validate that all users exist
+    let (tx, rx) = oneshot::channel();
+    st.tx
+        .send(DatabaseCommand::GetExistingUsers {
+            users: body
+                .members
+                .iter()
+                .map(|m| (m.user_id, m.email.clone()))
+                .collect(),
+            responder: tx,
+        })
+        .await
+        .unwrap();
+    let existing_users = match rx.await.unwrap() {
+        Ok(existing_users) => existing_users,
+        Err(e) => {
+            println!("Failed to get existing users with {e:?}");
+            return (StatusCode::BAD_REQUEST, "Failed to get existing users").into_response();
+        }
+    };
+    if existing_users.len() != body.members.len() {
+        return (StatusCode::BAD_REQUEST, "Not all users exist").into_response();
+    }
+    // and that current user is present
+    if !existing_users.iter().any(|user| user.0 == user_id) {
+        return (StatusCode::UNAUTHORIZED, "User not present in group").into_response();
+    }
+
+    // first, check if such a group exists
+    let (tx, rx) = oneshot::channel();
+    st.tx
+        .send(DatabaseCommand::GetGroupByMembers {
+            members: body.members.iter().map(|m| m.user_id).collect(),
+            responder: tx,
+        })
+        .await
+        .unwrap();
+    let group_id = match rx.await.unwrap() {
+        Ok(group_id) => group_id,
+        Err(e) => {
+            println!("Failed to get group by members with {e:?}");
+            return (StatusCode::BAD_REQUEST, "Failed to get group by members").into_response();
+        }
+    };
+    if let Some(group_id) = group_id {
+        // then return 409 and the group id
+        return (StatusCode::CONFLICT, Json(CreateGroupResponse { group_id })).into_response();
+    }
+    // so now actually create group
+    let (tx, rx) = oneshot::channel();
+    st.tx
+        .send(DatabaseCommand::CreateGroup {
+            members: body
+                .members
+                .into_iter()
+                .map(|m| (m.user_id, m.pk_pub))
+                .collect(),
+            responder: tx,
+        })
+        .await
+        .unwrap();
+    let group_id = match rx.await.unwrap() {
+        Ok(group_id) => group_id,
+        Err(e) => {
+            println!("Failed to create group with {e:?}");
+            return (StatusCode::BAD_REQUEST, "Failed to create group").into_response();
+        }
+    };
+    (StatusCode::OK, Json(CreateGroupResponse { group_id })).into_response()
+}
+
+#[derive(Serialize, Debug)]
+pub(crate) struct ListGroupsItem {
+    group_id: i64,
+    name: String,
+}
+#[derive(Serialize, Debug)]
+pub(crate) struct ListGroupsResponse {
+    groups: Vec<ListGroupsItem>,
+}
+pub(crate) async fn list_groups(
+    State(st): State<HandlerState>,
+    Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
+) -> impl IntoResponse {
+    // query db
+    let (tx, rx) = oneshot::channel();
+    st.tx
+        .send(DatabaseCommand::ListGroups {
+            user_id: user_id,
+            responder: tx,
+        })
+        .await
+        .unwrap();
+    // extract and convert to response type
+    let groups = match rx.await.unwrap() {
+        Ok(groups) => groups,
+        Err(e) => {
+            println!("Failed to list groups with {e:?}");
+            return (StatusCode::BAD_REQUEST, "Failed to list groups").into_response();
+        }
+    };
+    let groups = groups
+        .into_iter()
+        .map(|g| ListGroupsItem {
+            group_id: g.0,
+            name: g.1,
+        })
+        .collect();
+    // send response
+    (StatusCode::OK, Json(ListGroupsResponse { groups })).into_response()
+}
+
+// ==============================
+// Tests
+// ==============================
 
 #[cfg(test)]
 mod tests {

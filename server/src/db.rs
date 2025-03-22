@@ -1,4 +1,6 @@
 pub const DB_NAME: &str = "e2ee-file-sharing.db";
+use std::rc::Rc;
+
 use corelib::server::salt_password;
 use rusqlite::{Connection, Result, params};
 
@@ -147,6 +149,130 @@ pub fn get_filename(conn: &Connection, file_id: i64) -> Result<String> {
     ";
     let mut statement = conn.prepare(sql).unwrap();
     statement.query_row([file_id], |row| row.get::<usize, String>(0))
+}
+
+pub fn get_group(conn: &Connection, group_id: i64) -> Result<Vec<(String, i64, Vec<u8>)>> {
+    let sql = "
+        SELECT id, email, pk_pub FROM users u LEFT JOIN groups_user_junction g ON u.id = g.user_id WHERE g.group_id = ?;
+    ";
+    let mut statement = conn.prepare(sql).unwrap();
+    statement
+        .query_map([group_id], |row| {
+            Ok((
+                row.get::<usize, String>(0)?,
+                row.get::<usize, i64>(1)?,
+                row.get::<usize, Vec<u8>>(2)?,
+            ))
+        })?
+        .collect()
+}
+pub fn get_group_key(conn: &Connection, group_id: i64, user_id: i64) -> Result<Vec<u8>> {
+    let sql = "
+        SELECT encrypted_key FROM groups_user_junction WHERE group_id = ? AND user_id = ?;
+    ";
+    let mut statement = conn.prepare(sql).unwrap();
+    statement.query_row(params![group_id, user_id], |row| row.get(0))
+}
+pub fn get_existing_users(
+    conn: &Connection,
+    users: Vec<(i64, String)>,
+) -> Result<Vec<(i64, String)>> {
+    let sql = "
+        SELECT id, email FROM (
+            SELECT u1.id, u1.email FROM users u1 WHERE u1.email IN (?)
+            JOIN
+            SELECT u2.id, u2.email FROM users u2 WHERE u2.id IN (?)
+            ON u1.id = u2.id
+        )
+    ";
+    let mut statement = conn.prepare(sql).unwrap();
+    let ids: Rc<Vec<rusqlite::types::Value>> = Rc::new(
+        users
+            .iter()
+            .map(|(id, _)| rusqlite::types::Value::Integer(*id))
+            .collect(),
+    );
+    let emails: Rc<Vec<rusqlite::types::Value>> = Rc::new(
+        users
+            .into_iter()
+            .map(|(_, email)| rusqlite::types::Value::Text(email))
+            .collect(),
+    );
+    statement
+        .query_map(params![ids, emails], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect()
+}
+
+pub fn get_group_id(conn: &Connection, members: &Vec<i64>) -> Result<Option<i64>> {
+    // query the database
+    let sql = "
+    SELECT group_id FROM groups_user_junction
+    GROUP BY group_id
+    HAVING COUNT(DISTINCT CASE WHEN user_id IN ? THEN user_id END) = ?
+    AND COUNT(DISTINCT CASE WHEN user_id NOT IN ? THEN user_id END) = 0;";
+    let mut statement = conn.prepare(sql).unwrap();
+    let rc: Rc<Vec<rusqlite::types::Value>> = Rc::new(
+        members
+            .iter()
+            .map(|id| rusqlite::types::Value::Integer(*id))
+            .collect(),
+    );
+    let group_ids: Result<Vec<i64>> = statement
+        .query_map(params![&rc, members.len(), &rc], |row| {
+            Ok(row.get::<usize, i64>(0)?)
+        })?
+        .collect();
+    let group_ids = group_ids?;
+
+    // make sure only one group matches
+    // and return that group, or None if no groups match
+    if group_ids.len() > 0 {
+        assert!(group_ids.len() == 1);
+        Ok(Some(group_ids[0]))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn create_group(conn: &Connection, members: Vec<(i64, Vec<u8>)>) -> Result<i64> {
+    // insert group
+    let sql = "
+        INSERT INTO groups VALUES (NULL) RETURNING id;
+    ";
+    let mut statement = conn
+        .prepare(sql)
+        .expect("Failed to prepare group insert statement");
+    let group_id = statement.query_row([], |row| row.get::<usize, i64>(0))?;
+
+    // insert members
+    let mut repeated_part = format!("({group_id}, ? 'group_{group_id}', ?),").repeat(members.len());
+    repeated_part.pop();
+    let sql = format!(
+        "INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES {repeated_part};"
+    );
+    let mut statement = conn
+        .prepare(&sql)
+        .expect("Failed to prepare insert statement for groups_user_junction");
+    statement.execute(rusqlite::params_from_iter(members.into_iter().flat_map(
+        |m| {
+            vec![
+                rusqlite::types::Value::Integer(m.0),
+                rusqlite::types::Value::Blob(m.1),
+            ]
+        },
+    )))?;
+
+    // return new group id
+    Ok(group_id)
+}
+pub fn get_groups_for_user_id(conn: &Connection, user_id: i64) -> Result<Vec<(i64, String)>> {
+    let sql = "
+        SELECT group_id, name FROM groups_user_junction WHERE user_id = ?;
+    ";
+    let mut statement = conn.prepare(sql).unwrap();
+    statement
+        .query_map([user_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect()
 }
 
 #[cfg(test)]
