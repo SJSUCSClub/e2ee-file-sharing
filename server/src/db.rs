@@ -2,7 +2,7 @@ pub const DB_NAME: &str = "e2ee-file-sharing.db";
 use std::rc::Rc;
 
 use corelib::server::salt_password;
-use rusqlite::{Connection, Result, params};
+use rusqlite::{Connection, Result, params, params_from_iter, types::Value};
 
 /// initialize all expected tables within a database connection
 ///
@@ -11,6 +11,7 @@ use rusqlite::{Connection, Result, params};
 /// NOTE: will not update an existing table, so in the case of a migration
 /// simply changing the schema within this function will not migrate existing tables
 pub fn init_db(conn: &Connection) -> Result<()> {
+    rusqlite::vtab::array::load_module(&conn)?;
     let sql = "
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -151,21 +152,38 @@ pub fn get_filename(conn: &Connection, file_id: i64) -> Result<String> {
     statement.query_row([file_id], |row| row.get::<usize, String>(0))
 }
 
-pub fn get_group(conn: &Connection, group_id: i64) -> Result<Vec<(String, i64, Vec<u8>)>> {
+/// Retrieves a list of all users in the given group.
+///
+/// # Arguments
+///
+/// * `conn` - A reference to the SQLite database connection.
+/// * `group_id` - The ID of the group to query.
+///
+/// # Returns
+///
+/// A `Result` containing a vector of tuples, where each tuple contains the email and user ID of a user in the group.
+pub fn get_group(conn: &Connection, group_id: i64) -> Result<Vec<(String, i64)>> {
     let sql = "
-        SELECT id, email, pk_pub FROM users u LEFT JOIN groups_user_junction g ON u.id = g.user_id WHERE g.group_id = ?;
+        SELECT email, id FROM users u LEFT JOIN groups_user_junction g ON u.id = g.user_id WHERE g.group_id = ?;
     ";
     let mut statement = conn.prepare(sql).unwrap();
     statement
         .query_map([group_id], |row| {
-            Ok((
-                row.get::<usize, String>(0)?,
-                row.get::<usize, i64>(1)?,
-                row.get::<usize, Vec<u8>>(2)?,
-            ))
+            Ok((row.get::<usize, String>(0)?, row.get::<usize, i64>(1)?))
         })?
         .collect()
 }
+/// Retrieves the encrypted key for a given group and user.
+///
+/// # Arguments
+///
+/// * `conn` - A reference to the SQLite database connection.
+/// * `group_id` - The ID of the group to query.
+/// * `user_id` - The ID of the user to query.
+///
+/// # Returns
+///
+/// A `Result` containing the encrypted key as a `Vec<u8>`.
 pub fn get_group_key(conn: &Connection, group_id: i64, user_id: i64) -> Result<Vec<u8>> {
     let sql = "
         SELECT encrypted_key FROM groups_user_junction WHERE group_id = ? AND user_id = ?;
@@ -173,52 +191,58 @@ pub fn get_group_key(conn: &Connection, group_id: i64, user_id: i64) -> Result<V
     let mut statement = conn.prepare(sql).unwrap();
     statement.query_row(params![group_id, user_id], |row| row.get(0))
 }
+/// Retrieves a list of all the users with the given emails/ids that exist in the database.
+///
+/// # Arguments
+///
+/// * `conn` - A reference to the SQLite database connection.
+/// * `users` - A vector of tuples, where each tuple contains the user ID and email of a user.
+///
+/// # Returns
+///
+/// A `Result` containing a vector of tuples, where each tuple contains the user ID and email of a user
+/// that exists in the database.
 pub fn get_existing_users(
     conn: &Connection,
     users: Vec<(i64, String)>,
 ) -> Result<Vec<(i64, String)>> {
-    let sql = "
-        SELECT id, email FROM (
-            SELECT u1.id, u1.email FROM users u1 WHERE u1.email IN (?)
-            JOIN
-            SELECT u2.id, u2.email FROM users u2 WHERE u2.id IN (?)
-            ON u1.id = u2.id
-        )
-    ";
-    let mut statement = conn.prepare(sql).unwrap();
-    let ids: Rc<Vec<rusqlite::types::Value>> = Rc::new(
-        users
-            .iter()
-            .map(|(id, _)| rusqlite::types::Value::Integer(*id))
-            .collect(),
-    );
-    let emails: Rc<Vec<rusqlite::types::Value>> = Rc::new(
-        users
-            .into_iter()
-            .map(|(_, email)| rusqlite::types::Value::Text(email))
-            .collect(),
-    );
+    let mut repeated = "(?, ?),".repeat(users.len());
+    repeated.pop(); // remove the last comma
+    let sql = format!("SELECT id, email FROM users WHERE (id, email) IN ({repeated});");
+    let mut statement = conn.prepare(&sql).unwrap();
+
+    let params = users
+        .into_iter()
+        .flat_map(|u| vec![Value::Integer(u.0), Value::Text(u.1)]);
     statement
-        .query_map(params![ids, emails], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .query_map(params_from_iter(params), |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?
         .collect()
 }
 
+/// Retrieves the group ID for a given list of user IDs.
+///
+/// # Arguments
+///
+/// * `conn` - A reference to the SQLite database connection.
+/// * `members` - A vector of user IDs.
+///
+/// # Returns
+///
+/// A `Result` containing the group ID if a group exists containing all of
+/// the specified users, or `None` if no group exists.
 pub fn get_group_id(conn: &Connection, members: &Vec<i64>) -> Result<Option<i64>> {
     // query the database
     let sql = "
     SELECT group_id FROM groups_user_junction
     GROUP BY group_id
-    HAVING COUNT(DISTINCT CASE WHEN user_id IN ? THEN user_id END) = ?
-    AND COUNT(DISTINCT CASE WHEN user_id NOT IN ? THEN user_id END) = 0;";
+    HAVING COUNT(DISTINCT CASE WHEN user_id IN rarray(?1) THEN user_id END) = ?2
+    AND COUNT(DISTINCT CASE WHEN user_id NOT IN rarray(?1) THEN user_id END) = 0;";
     let mut statement = conn.prepare(sql).unwrap();
-    let rc: Rc<Vec<rusqlite::types::Value>> = Rc::new(
-        members
-            .iter()
-            .map(|id| rusqlite::types::Value::Integer(*id))
-            .collect(),
-    );
+    let user_id_vec: Rc<Vec<Value>> = Rc::new(members.iter().map(|u| Value::Integer(*u)).collect());
     let group_ids: Result<Vec<i64>> = statement
-        .query_map(params![&rc, members.len(), &rc], |row| {
+        .query_map(params![user_id_vec, members.len()], |row| {
             Ok(row.get::<usize, i64>(0)?)
         })?
         .collect();
@@ -227,13 +251,24 @@ pub fn get_group_id(conn: &Connection, members: &Vec<i64>) -> Result<Option<i64>
     // make sure only one group matches
     // and return that group, or None if no groups match
     if group_ids.len() > 0 {
-        assert!(group_ids.len() == 1);
+        assert!(group_ids.len() == 1); // somehow backend messed up
         Ok(Some(group_ids[0]))
     } else {
         Ok(None)
     }
 }
 
+/// Creates a new group in the database with the given members.
+/// This should only be called after checking if one already exists.
+///
+/// # Arguments
+///
+/// * `conn` - A reference to the SQLite database connection.
+/// * `members` - A vector of tuples, where each tuple contains the user ID and encrypted key of a user.
+///
+/// # Returns
+///
+/// A `Result` containing the ID of the newly created group.
 pub fn create_group(conn: &Connection, members: Vec<(i64, Vec<u8>)>) -> Result<i64> {
     // insert group
     let sql = "
@@ -245,7 +280,9 @@ pub fn create_group(conn: &Connection, members: Vec<(i64, Vec<u8>)>) -> Result<i
     let group_id = statement.query_row([], |row| row.get::<usize, i64>(0))?;
 
     // insert members
-    let mut repeated_part = format!("({group_id}, ? 'group_{group_id}', ?),").repeat(members.len());
+    // note: group_id is an integer from us, so no need to escape it
+    let mut repeated_part =
+        format!("({group_id}, ?, 'group_{group_id}', ?),").repeat(members.len());
     repeated_part.pop();
     let sql = format!(
         "INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES {repeated_part};"
@@ -253,18 +290,26 @@ pub fn create_group(conn: &Connection, members: Vec<(i64, Vec<u8>)>) -> Result<i
     let mut statement = conn
         .prepare(&sql)
         .expect("Failed to prepare insert statement for groups_user_junction");
-    statement.execute(rusqlite::params_from_iter(members.into_iter().flat_map(
-        |m| {
-            vec![
-                rusqlite::types::Value::Integer(m.0),
-                rusqlite::types::Value::Blob(m.1),
-            ]
-        },
-    )))?;
+    statement.execute(rusqlite::params_from_iter(
+        members
+            .into_iter()
+            .flat_map(|m| vec![Value::Integer(m.0), Value::Blob(m.1)]),
+    ))?;
 
     // return new group id
     Ok(group_id)
 }
+
+/// Retrieves all groups for a given user ID.
+///
+/// # Arguments
+///
+/// * `conn` - A reference to the SQLite database connection.
+/// * `user_id` - The ID of the user.
+///
+/// # Returns
+///
+/// A `Result` containing a vector of tuples, where each tuple contains the group ID and name.
 pub fn get_groups_for_user_id(conn: &Connection, user_id: i64) -> Result<Vec<(i64, String)>> {
     let sql = "
         SELECT group_id, name FROM groups_user_junction WHERE user_id = ?;
@@ -416,5 +461,182 @@ mod tests {
 
         // get nonexistent
         assert!(get_filename(&conn, 2).is_err());
+    }
+
+    #[test]
+    fn test_get_group() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_test_db(&conn);
+
+        // query current database
+        let result = get_group(&conn, 1);
+        let result = result.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "test@test.com");
+        assert_eq!(result[0].1, 1);
+
+        // and try with a new group too
+        conn.execute("INSERT INTO users (email, salt, password_hash, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00'), ('test4@test.com', X'00', X'00', X'00');", []).expect("Failed to execute insert");
+        conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
+            .expect("Failed to execute insert");
+        conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (2, 2, 'group_name', X'00'), (2, 3, 'group_name', X'00'), (2, 4, 'group_name', X'00');", []).expect("Failed to insert into groups_user_junction");
+        let result = get_group(&conn, 2);
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].0, "test2@test.com");
+        assert_eq!(result[0].1, 2);
+        assert_eq!(result[1].0, "test3@test.com");
+        assert_eq!(result[1].1, 3);
+        assert_eq!(result[2].0, "test4@test.com");
+        assert_eq!(result[2].1, 4);
+    }
+
+    #[test]
+    fn test_get_group_key() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_test_db(&conn);
+        conn.execute("INSERT INTO users (email, salt, password_hash, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00');", []).expect("Failed to insert");
+        conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
+            .expect("Failed to insert");
+        conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 2, 'group_name', X'01'), (2, 1, 'group_name', X'02'), (2, 2, 'group_name', X'03');", []).expect("Failed to insert");
+
+        // should allow different keys for different (user, group) pairs
+        let result = get_group_key(&conn, 1, 1).unwrap();
+        assert_eq!(result, vec![0 as u8]);
+        let result = get_group_key(&conn, 1, 2).unwrap();
+        assert_eq!(result, vec![1 as u8]);
+        let result = get_group_key(&conn, 2, 1).unwrap();
+        assert_eq!(result, vec![2 as u8]);
+        let result = get_group_key(&conn, 2, 2).unwrap();
+        assert_eq!(result, vec![3 as u8]);
+    }
+
+    #[test]
+    fn test_get_existing_users() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_test_db(&conn);
+        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00'), ('test4@test.com', X'00', X'00', X'00');", []).expect("Failed to insert into users");
+
+        // test with id/email mismatch
+        let result = get_existing_users(
+            &conn,
+            vec![
+                (1, "test2@test.com".to_string()),
+                (2, "test3@test.com".to_string()),
+                (3, "test@test.com".to_string()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(result, vec![]);
+
+        // test with proper id/email pairs
+        let result = get_existing_users(
+            &conn,
+            vec![
+                (2, "test2@test.com".to_string()),
+                (3, "test3@test.com".to_string()),
+                (1, "test@test.com".to_string()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            vec![
+                (1, "test@test.com".to_string()),
+                (2, "test2@test.com".to_string()),
+                (3, "test3@test.com".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_get_group_id() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_test_db(&conn);
+        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00'), ('test4@test.com', X'00', X'00', X'00');", []).expect("Failed to insert into users");
+        conn.execute("INSERT INTO groups VALUES (NULL);", [])
+            .expect("Failed to insert into groups");
+        conn.execute("INSERT INTO groups VALUES (NULL);", [])
+            .expect("Failed to insert into groups");
+        conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 2, 'group1', X'00'), (1, 3, 'group1', X'00'), (1, 4, 'group1', X'00'), (2, 1, 'group1', X'00'), (2, 3, 'group1', X'00'), (3, 1, 'group1', X'00'), (3, 4, 'group1', X'00');", []).expect("Failed to insert into groups_user_junction");
+
+        // query the big group
+        let result = get_group_id(&conn, &vec![1, 2, 3, 4]).unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), 1);
+
+        // query smaller groups
+        let result = get_group_id(&conn, &vec![1, 3]).unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), 2);
+        let result = get_group_id(&conn, &vec![1, 4]).unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), 3);
+
+        // and try nonexistent group
+        let result = get_group_id(&conn, &vec![2, 4]).unwrap();
+        assert!(result.is_none());
+        // and try with duplicates
+        let result = get_group_id(&conn, &vec![1, 2, 3, 1]).unwrap();
+        assert!(result.is_none());
+        let result = get_group_id(&conn, &vec![1, 3, 1]).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_create_group() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_test_db(&conn);
+        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00'), ('test4@test.com', X'00', X'00', X'00');", []).expect("Failed to insert into users");
+
+        // create group containing user 1 and user 2
+        let result = create_group(&conn, vec![(1, vec![0 as u8]), (2, vec![1 as u8])]).unwrap();
+        assert_eq!(result, 2);
+        let user_key = conn
+            .query_row(
+                "SELECT encrypted_key FROM groups_user_junction WHERE group_id = 2 AND user_id = 1",
+                [],
+                |row| row.get::<usize, Vec<u8>>(0),
+            )
+            .unwrap();
+        assert_eq!(user_key, vec![0 as u8]);
+        let user_key = conn
+            .query_row(
+                "SELECT encrypted_key FROM groups_user_junction WHERE group_id = 2 AND user_id = 2",
+                [],
+                |row| row.get::<usize, Vec<u8>>(0),
+            )
+            .unwrap();
+        assert_eq!(user_key, vec![1 as u8]);
+    }
+
+    #[test]
+    fn test_get_groups_for_user_id() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_test_db(&conn);
+
+        conn.execute("INSERT INTO groups VALUES (NULL);", [])
+            .unwrap();
+        conn.execute("INSERT INTO groups VALUES (NULL);", [])
+            .unwrap();
+        conn.execute("INSERT INTO groups VALUES (NULL);", [])
+            .unwrap();
+        conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (2, 1, 'group2', X'00'), (3, 1, 'group3', X'00'), (4, 1, 'group4', X'00');", []).unwrap();
+
+        let result = get_groups_for_user_id(&conn, 1).unwrap();
+        assert_eq!(
+            result,
+            vec![
+                (1, "group_name".to_string()),
+                (2, "group2".to_string()),
+                (3, "group3".to_string()),
+                (4, "group4".to_string())
+            ]
+        );
+
+        // test nonexistent
+        let result = get_groups_for_user_id(&conn, 2).unwrap();
+        assert_eq!(result, vec![]);
     }
 }

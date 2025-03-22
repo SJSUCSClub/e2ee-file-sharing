@@ -8,7 +8,7 @@ corelib = { version = "0.1.0", path = "../corelib" }
 axum = { version = "0.8.1", features = ["multipart", "macros"] }
 tokio = { version = "1.43.0", features = ["rt", "macros", "fs", "rt-multi-thread"] }
 tokio-util = { version = "0.7.14", features = ["io"] }
-rusqlite = { version = "0.34.0", features = ["bundled", "array"] }
+rusqlite = { version = "0.34.0", features = ["bundled", "vtab", "array"] }
 serde = { version = "1.0.219", features = ["derive"] }
 
 [dev-dependencies]
