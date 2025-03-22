@@ -5,12 +5,12 @@ use sha2::Digest;
 ///
 /// # Returns
 ///
-/// A random 8-byte salt, as a u64
-pub fn make_salt() -> u64 {
+/// A random 8-byte salt, as bytes
+pub fn make_salt() -> [u8; 8] {
     let mut bytes = [0; 8]; // 8-byte salt
     let mut rng = rand::thread_rng();
     rng.try_fill_bytes(&mut bytes).unwrap();
-    u64::from_le_bytes(bytes)
+    bytes
 }
 
 /// Hashes a password with a salt
@@ -23,10 +23,10 @@ pub fn make_salt() -> u64 {
 /// # Returns
 ///
 /// The hashed password, as bytes
-pub fn salt_password(password: &str, salt: u64) -> Vec<u8> {
+pub fn salt_password(password: &str, salt: &[u8]) -> Vec<u8> {
     let mut hasher = sha2::Sha256::new();
     hasher.update(password);
-    hasher.update(salt.to_le_bytes());
+    hasher.update(&salt);
     hasher.finalize().to_vec()
 }
 
@@ -38,8 +38,8 @@ mod tests {
     fn test_salt_password() {
         let password = "password123";
         let salt = make_salt();
-        let salted_password = salt_password(password, salt);
-        let salted_password_2 = salt_password(password, salt);
+        let salted_password = salt_password(password, &salt);
+        let salted_password_2 = salt_password(password, &salt);
         assert_eq!(salted_password, salted_password_2);
     }
 }
