@@ -206,6 +206,9 @@ pub fn get_existing_users(
     conn: &Connection,
     users: Vec<(i64, String)>,
 ) -> Result<Vec<(i64, String)>> {
+    // use a repeated statement because we can't use rarray
+    // since rarray requires Rc<Vec<Value>>, and Value is only
+    // Text, Integer, Real, or Blob. We need a tuple, so we do it ourselves
     let mut repeated = "(?, ?),".repeat(users.len());
     repeated.pop(); // remove the last comma
     let sql = format!("SELECT id, email FROM users WHERE (id, email) IN ({repeated});");
