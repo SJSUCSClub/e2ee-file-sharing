@@ -38,17 +38,26 @@ fn main() {
     let args = Cli::parse();
 
     // get disk key path
+    // according to https://specifications.freedesktop.org/basedir-spec/latest/,
+    // we want to start with $XDG_DATA_HOME
+    // and if that doesn't work, fall back to $HOME/.local/share
+    // else fall back to $HOME
     // even though home_dir is still marked as deprecated in 1.85,
     // the docs say that it's actually fine and will be un-deprecated in 1.86
     // https://crates.io/crates/home
-    let disk_key_path = env::home_dir()
-        .expect("Failed to get home directory")
-        .join(".e2ee");
+    let disk_key_root = env::var("XDG_DATA_HOME").unwrap_or_else(|_| {
+        let home = env::home_dir().expect("Inaccessible");
+        if fs::exists(home.join(".local/share")).expect("Inaccessible") {
+            home.join(".local/share").to_str().unwrap().to_string()
+        } else {
+            home.to_str().unwrap().to_string()
+        }
+    });
+    let disk_key_path = PathBuf::from(disk_key_root).join(".e2ee-file-sharing");
     let disk_key_path = disk_key_path.as_path();
 
     // create directory if it doesn't exist
-    std::fs::create_dir_all(disk_key_path)
-        .expect("Failed to create storage directory! Check permissions on ~/.e2ee/ and try again");
+    std::fs::create_dir_all(disk_key_path).expect("Inaccessible");
 
     let password = args.password.unwrap_or_else(|| {
         print!("Password: ");
@@ -68,10 +77,8 @@ fn main() {
         }
         // passwords match
         // first, check if we already have a key
-        if fs::exists(disk_key_path.join(&args.email)).expect(
-            "Failed to check storage directory! Check permissions on ~/.e2ee/ and try again",
-        ) {
-            println!("User disk key already exists at ~/.e2ee/{}!", args.email);
+        if fs::exists(disk_key_path.join(&args.email)).expect("Inaccessible") {
+            println!("User disk key already exists!");
             println!(
                 "Please remove this file to register a user with the provided email, or use a different email."
             );
@@ -109,15 +116,13 @@ fn main() {
         // choice of postcard because it does well on benchmarks:
         // https://github.com/djkoloski/rust_serialization_benchmark
         let bytes = postcard::to_stdvec(&keys).unwrap().to_vec();
-        fs::write(disk_key_path.join(&args.email), bytes)
-            .expect("Failed to write disk keys! Check permissions on ~/.e2ee/ and try again");
+        fs::write(disk_key_path.join(&args.email), bytes).expect("Inaccessible");
         println!("Registration successful!");
         return;
     }
 
     // look in storage to recover our kp and key hash
-    let bytes = fs::read(disk_key_path.join(&args.email))
-        .expect("Failed to find disk keys! You may need to re-register with a new user!");
+    let bytes = fs::read(disk_key_path.join(&args.email)).expect("Failed to find disk keys!");
     let keys: DiskKeys = postcard::from_bytes(bytes.as_slice()).unwrap();
     let personal_key = PersonalKey::derive(&args.email, &password);
     let kp = keys.to_memory(&personal_key);
