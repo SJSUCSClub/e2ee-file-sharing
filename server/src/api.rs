@@ -65,7 +65,7 @@ pub(crate) enum DatabaseCommand {
     },
     GetGroupById {
         group_id: i64,
-        responder: oneshot::Sender<rusqlite::Result<Vec<(String, i64, Vec<u8>)>>>,
+        responder: oneshot::Sender<rusqlite::Result<Vec<(String, i64)>>>,
     },
     GetGroupKey {
         group_id: i64,
@@ -374,14 +374,13 @@ pub(crate) async fn upload_file(
 // GROUPS endpoints
 // ==============================
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub(crate) struct GetGroupItem {
     email: String,
     user_id: i64,
-    pk_pub: Vec<u8>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct GetGroupResponse {
     members: Vec<GetGroupItem>,
 }
@@ -410,12 +409,8 @@ pub(crate) async fn get_group_by_id(
 
     // collect into proper format
     let mut members = Vec::new();
-    for (email, user_id, pk_pub) in group_members {
-        members.push(GetGroupItem {
-            email,
-            user_id,
-            pk_pub,
-        });
+    for (email, user_id) in group_members {
+        members.push(GetGroupItem { email, user_id });
     }
 
     // validate that the user is in the group before returning
@@ -425,7 +420,7 @@ pub(crate) async fn get_group_by_id(
     (StatusCode::OK, Json(GetGroupResponse { members })).into_response()
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct GetGroupKeyResponse {
     encrypted_key: Vec<u8>,
 }
@@ -454,29 +449,20 @@ pub(crate) async fn get_group_key_by_id(
     (StatusCode::OK, Json(GetGroupKeyResponse { encrypted_key })).into_response()
 }
 
-#[derive(Deserialize, Debug)]
-pub(crate) struct GetGroupByMembersItem {
-    email: String,
-    user_id: i64,
-}
-#[derive(Deserialize, Debug)]
-pub(crate) struct GetGroupByMembersQueryParams {
-    members: Vec<GetGroupByMembersItem>,
-}
-#[derive(Serialize, Debug)]
-pub(crate) struct GetGroupsByMembersREsponse {
+#[derive(Serialize, Deserialize, Debug)]
+pub(crate) struct GetGroupsByMembersResponse {
     group_id: i64,
 }
 pub(crate) async fn get_group_by_members(
-    Query(params): Query<GetGroupByMembersQueryParams>,
     State(st): State<HandlerState>,
     Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
+    Json(body): Json<GetGroupResponse>,
 ) -> impl IntoResponse {
     // validate that all users exist
     let (tx, rx) = oneshot::channel();
     st.tx
         .send(DatabaseCommand::GetExistingUsers {
-            users: params
+            users: body
                 .members
                 .iter()
                 .map(|m| (m.user_id, m.email.clone()))
@@ -492,7 +478,7 @@ pub(crate) async fn get_group_by_members(
             return (StatusCode::BAD_REQUEST, "Failed to get existing users").into_response();
         }
     };
-    if existing_users.len() != params.members.len() {
+    if existing_users.len() != body.members.len() {
         return (StatusCode::BAD_REQUEST, "Not all users exist").into_response();
     }
     // and that current user is present
@@ -504,7 +490,7 @@ pub(crate) async fn get_group_by_members(
     let (tx, rx) = oneshot::channel();
     st.tx
         .send(DatabaseCommand::GetGroupByMembers {
-            members: params.members.iter().map(|m| m.user_id).collect(),
+            members: body.members.iter().map(|m| m.user_id).collect(),
             responder: tx,
         })
         .await
@@ -521,31 +507,31 @@ pub(crate) async fn get_group_by_members(
     match group_id {
         Some(group_id) => (
             StatusCode::OK,
-            Json(GetGroupsByMembersREsponse { group_id }),
+            Json(GetGroupsByMembersResponse { group_id }),
         )
             .into_response(),
         None => (StatusCode::NOT_FOUND, "No such group exists").into_response(),
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub(crate) struct CreateGroupItem {
     user_id: i64,
     email: String,
-    pk_pub: Vec<u8>,
+    encrypted_key: Vec<u8>,
 }
-#[derive(Deserialize, Debug)]
-pub(crate) struct CreateGroupQueryParams {
+#[derive(Deserialize, Serialize, Debug)]
+pub(crate) struct CreateGroupBody {
     members: Vec<CreateGroupItem>,
 }
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct CreateGroupResponse {
     group_id: i64,
 }
 pub(crate) async fn create_group(
     State(st): State<HandlerState>,
     Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
-    Json(body): Json<CreateGroupQueryParams>,
+    Json(body): Json<CreateGroupBody>,
 ) -> impl IntoResponse {
     // validate that all users exist
     let (tx, rx) = oneshot::channel();
@@ -602,7 +588,7 @@ pub(crate) async fn create_group(
             members: body
                 .members
                 .into_iter()
-                .map(|m| (m.user_id, m.pk_pub))
+                .map(|m| (m.user_id, m.encrypted_key))
                 .collect(),
             responder: tx,
         })
@@ -665,7 +651,7 @@ pub(crate) async fn list_groups(
 
 #[cfg(test)]
 mod tests {
-    use std::vec;
+    use std::{fs, vec};
 
     use axum::{
         Router,
@@ -745,6 +731,11 @@ mod tests {
             &body[..],
             b"This is the ACM E2E file sharing server instance."
         );
+
+        // Note: for some reason, trying a request with no user_email and no user_password_hash
+        // gets by in the authentication middleware in the tests
+        // but not in the real server
+        // so, not testing for that
 
         // and try improperly authenticated requests
         let request = Request::builder()
@@ -848,9 +839,17 @@ mod tests {
         );
     }
 
+    struct TestGetFileCleaner {}
+    impl Drop for TestGetFileCleaner {
+        fn drop(&mut self) {
+            fs::remove_dir_all("/tmp/upload-e2e-test").unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn test_get_file() {
         // setup
+        let _cleaner = TestGetFileCleaner {};
         let conn = Connection::open_in_memory().unwrap();
         db::init_db(&conn).unwrap();
         let upload_directory = "/tmp/upload-e2e-test";
@@ -898,12 +897,19 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
 
         assert_eq!(&body[..], b"HI THERE");
-        tokio::fs::remove_dir_all(upload_directory).await.unwrap();
+    }
+
+    struct TestUploadFileCleaner {}
+    impl Drop for TestUploadFileCleaner {
+        fn drop(&mut self) {
+            fs::remove_dir_all("/tmp/upload-e2e-test-upload").unwrap();
+        }
     }
 
     #[tokio::test]
     async fn test_upload_file() {
         // setup
+        let _cleaner = TestUploadFileCleaner {};
         let conn = Connection::open_in_memory().unwrap();
         db::init_db(&conn).unwrap();
         let upload_directory = "/tmp/upload-e2e-test-upload";
@@ -953,6 +959,440 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(contents, "HELLO WORLD");
-        tokio::fs::remove_dir_all(upload_directory).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_group_by_id() {
+        // setup
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_db(&conn).unwrap();
+        // add several users and a group
+        let salt = make_salt();
+        let password_hash = salt_password("AABBCC", &salt);
+        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00'), ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00');", params![password_hash, salt]).unwrap();
+        conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
+            .unwrap();
+        conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 1, 'group_name', X'00'), (1, 2, 'group_name', X'00'), (1, 3, 'group_name', X'00');", []).unwrap();
+        conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
+            .unwrap();
+        conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (2, 2, 'group_name', X'00'), (2, 3, 'group_name', X'00');", []).unwrap();
+
+        // initialize state
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let state = HandlerState {
+            tx,
+            upload_directory: "".to_string(),
+        };
+        tokio::spawn(connection_task(conn, rx));
+
+        // build app
+        let mut app = Router::new()
+            .route("/{group_id}", authenticated(&state, get(get_group_by_id)))
+            .with_state(state);
+
+        // try properly authenticated request
+        let request = Request::builder()
+            .uri("/1?user_email=test@test.com&user_password_hash=AABBCC")
+            .method("GET")
+            .body(Body::empty())
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: GetGroupResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.members.len(), 3);
+        assert_eq!(
+            body.members,
+            vec![
+                GetGroupItem {
+                    user_id: 1,
+                    email: "test@test.com".to_string()
+                },
+                GetGroupItem {
+                    user_id: 2,
+                    email: "test2@test.com".to_string()
+                },
+                GetGroupItem {
+                    user_id: 3,
+                    email: "test3@test.com".to_string()
+                }
+            ]
+        );
+
+        // try unauthenticated request
+        let request = Request::builder()
+            .uri("/2?user_email=test@test.com&user_password_hash=AABBCC")
+            .method("GET")
+            .body(Body::empty())
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"User not present in group");
+    }
+
+    #[tokio::test]
+    async fn test_get_group_key_by_id() {
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_db(&conn).unwrap();
+        let salt = make_salt();
+        let password_hash = salt_password("AABBCC", &salt);
+        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00'), ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00');", params![password_hash, salt]).unwrap();
+        conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
+            .unwrap();
+        conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
+            .unwrap();
+        conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
+            .unwrap();
+        let key = vec![22u8, 33u8, 11u8];
+        conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 1, 'group_name', X'00'), (2, 2, 'group_name', X'00'), (2, 3, 'group_name', X'00'), (3, 1, 'group_name', ?);", [&key]).unwrap();
+        // initialize state
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let state = HandlerState {
+            tx,
+            upload_directory: "".to_string(),
+        };
+        tokio::spawn(connection_task(conn, rx));
+
+        // build app
+        let mut app = Router::new()
+            .route(
+                "/{group_id}/key",
+                authenticated(&state, get(get_group_key_by_id)),
+            )
+            .with_state(state);
+
+        // try properly authenticated request
+        let request = Request::builder()
+            .uri("/1/key?user_email=test@test.com&user_password_hash=AABBCC")
+            .method("GET")
+            .body(Body::empty())
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: GetGroupKeyResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.encrypted_key, vec![0 as u8]);
+
+        // try request to group that user is not part of
+        let request = Request::builder()
+            .uri("/2/key?user_email=test@test.com&user_password_hash=AABBCC")
+            .method("GET")
+            .body(Body::empty())
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"Failed to get group key");
+
+        // try request to group where group key is a "
+        let request = Request::builder()
+            .uri("/3/key?user_email=test@test.com&user_password_hash=AABBCC")
+            .method("GET")
+            .body(Body::empty())
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: GetGroupKeyResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.encrypted_key, key);
+    }
+
+    #[tokio::test]
+    pub async fn test_get_group_by_members() {
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_db(&conn).unwrap();
+        let salt = make_salt();
+        let password_hash = salt_password("AABBCC", &salt);
+
+        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00'), ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00');", params![&password_hash, &salt]).unwrap();
+        conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
+            .unwrap();
+        conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
+            .unwrap();
+        conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 1, 'group_name', X'00'), (1, 2, 'group_name', X'00'), (1, 3, 'group_name', X'00'), (2, 2, 'group_name', X'00'), (2, 3, 'group_name', X'00');", []).unwrap();
+
+        // initialize state
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let state = HandlerState {
+            tx,
+            upload_directory: "".to_string(),
+        };
+        tokio::spawn(connection_task(conn, rx));
+
+        // build app
+        let mut app = Router::new()
+            .route("/", authenticated(&state, get(get_group_by_members)))
+            .with_state(state);
+
+        // try properly authenticated request
+        let body = "{\"members\":[{\"user_id\":1,\"email\":\"test@test.com\"},{\"user_id\":2,\"email\":\"test2@test.com\"},{\"user_id\":3,\"email\":\"test3@test.com\"}]}";
+        let request = Request::builder()
+            .uri("/?user_email=test@test.com&user_password_hash=AABBCC")
+            .header("Content-Type", "application/json")
+            .method("GET")
+            .body(Body::from(body))
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: GetGroupsByMembersResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.group_id, 1);
+
+        // try one where the group doesn't exist
+        let body = "{\"members\":[{\"user_id\":1,\"email\":\"test@test.com\"},{\"user_id\":2,\"email\":\"test2@test.com\"}]}";
+        let request = Request::builder()
+            .uri("/?user_email=test@test.com&user_password_hash=AABBCC")
+            .header("Content-Type", "application/json")
+            .method("GET")
+            .body(Body::from(body))
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"No such group exists");
+
+        // try one where not all users exist
+        let body = "{\"members\":[{\"user_id\":1,\"email\":\"test@test.com\"},{\"user_id\":2,\"email\":\"test2@test.com\"}, {\"user_id\":3,\"email\":\"test3@test.com\"}, {\"user_id\":4,\"email\":\"test4@test.com\"}]}";
+        let request = Request::builder()
+            .uri("/?user_email=test@test.com&user_password_hash=AABBCC")
+            .header("Content-Type", "application/json")
+            .method("GET")
+            .body(Body::from(body))
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"Not all users exist");
+
+        // try one group exists but user not in it
+        let body = "{\"members\":[{\"user_id\":2,\"email\":\"test2@test.com\"}, {\"user_id\":3,\"email\":\"test3@test.com\"}]}";
+        let request = Request::builder()
+            .uri("/?user_email=test@test.com&user_password_hash=AABBCC")
+            .header("Content-Type", "application/json")
+            .method("GET")
+            .body(Body::from(body))
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"User not present in group");
+    }
+
+    struct TestCreateGroupCleaner {}
+    impl Drop for TestCreateGroupCleaner {
+        fn drop(&mut self) {
+            fs::remove_file("/tmp/test_create_group.db").unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_group() {
+        let _cleaner = TestCreateGroupCleaner {};
+        let conn = Connection::open("/tmp/test_create_group.db").unwrap();
+        db::init_db(&conn).unwrap();
+        let salt = make_salt();
+        let password_hash = salt_password("AABBCC", &salt);
+        conn.execute("INSERT INTO users (email, salt, password_hash, pk_pub) VALUES ('test@test.com', ?, ?, X'00'), ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00');", params![salt, password_hash]).unwrap();
+
+        // initialize state
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let state = HandlerState {
+            tx,
+            upload_directory: "".to_string(),
+        };
+        tokio::spawn(connection_task(conn, rx));
+
+        // initialize app
+        let mut app = Router::new()
+            .route("/", authenticated(&state, post(create_group)))
+            .with_state(state);
+
+        // try properly authenticated request
+        let key = [0u8, 1u8];
+        let key2 = [2u8, 3u8];
+        let request_body = CreateGroupBody {
+            members: vec![
+                CreateGroupItem {
+                    user_id: 1,
+                    email: "test@test.com".to_string(),
+                    encrypted_key: key.to_vec(),
+                },
+                CreateGroupItem {
+                    user_id: 2,
+                    email: "test2@test.com".to_string(),
+                    encrypted_key: key2.to_vec(),
+                },
+            ],
+        };
+        let request_body = serde_json::to_string(&request_body).unwrap();
+        let request = Request::builder()
+            .uri("/?user_email=test@test.com&user_password_hash=AABBCC")
+            .header("Content-Type", "application/json")
+            .method("POST")
+            .body(Body::from(request_body))
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: CreateGroupResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.group_id, 1);
+        let conn = Connection::open("/tmp/test_create_group.db").unwrap();
+        let recovered_key = conn
+            .query_row(
+                "SELECT encrypted_key FROM groups_user_junction WHERE group_id=1 AND user_id=1",
+                [],
+                |row| row.get::<usize, Vec<u8>>(0),
+            )
+            .unwrap();
+        assert_eq!(recovered_key, key);
+        let recovered_key2 = conn
+            .query_row(
+                "SELECT encrypted_key FROM groups_user_junction WHERE group_id=1 AND user_id=2",
+                [],
+                |row| row.get::<usize, Vec<u8>>(0),
+            )
+            .unwrap();
+        assert_eq!(recovered_key2, key2);
+
+        // try when not all users exist
+        let request_body = CreateGroupBody {
+            members: vec![
+                CreateGroupItem {
+                    user_id: 1,
+                    email: "test@test.com".to_string(),
+                    encrypted_key: key.to_vec(),
+                },
+                CreateGroupItem {
+                    user_id: 4,
+                    email: "test2@test.com".to_string(),
+                    encrypted_key: key2.to_vec(),
+                },
+            ],
+        };
+        let request_body = serde_json::to_string(&request_body).unwrap();
+        let request = Request::builder()
+            .uri("/?user_email=test@test.com&user_password_hash=AABBCC")
+            .header("Content-Type", "application/json")
+            .method("POST")
+            .body(Body::from(request_body))
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"Not all users exist");
+
+        // try when user not present
+        let request_body = CreateGroupBody {
+            members: vec![CreateGroupItem {
+                user_id: 2,
+                email: "test2@test.com".to_string(),
+                encrypted_key: key2.to_vec(),
+            }],
+        };
+        let request_body = serde_json::to_string(&request_body).unwrap();
+        let request = Request::builder()
+            .uri("/?user_email=test@test.com&user_password_hash=AABBCC")
+            .header("Content-Type", "application/json")
+            .method("POST")
+            .body(Body::from(request_body))
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"User not present in group");
+
+        // try when group already exists
+        let request_body = CreateGroupBody {
+            members: vec![
+                CreateGroupItem {
+                    user_id: 1,
+                    email: "test@test.com".to_string(),
+                    encrypted_key: key.to_vec(),
+                },
+                CreateGroupItem {
+                    user_id: 2,
+                    email: "test2@test.com".to_string(),
+                    encrypted_key: key2.to_vec(),
+                },
+            ],
+        };
+        let request_body = serde_json::to_string(&request_body).unwrap();
+        let request = Request::builder()
+            .uri("/?user_email=test@test.com&user_password_hash=AABBCC")
+            .header("Content-Type", "application/json")
+            .method("POST")
+            .body(Body::from(request_body))
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: CreateGroupResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.group_id, 1);
     }
 }
