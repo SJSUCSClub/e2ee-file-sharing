@@ -3,7 +3,7 @@ mod db;
 
 use std::env;
 
-use api::{HandlerState, authenticated, connection_task};
+use api::{HandlerState, authenticated, connection_task, get_group_by_id};
 use axum::{
     Router,
     routing::{get, post},
@@ -27,6 +27,14 @@ async fn main() {
         .route("/api/v1/list-files", auth(get(api::list_files)))
         .route("/api/v1/file", auth(get(api::get_file)))
         .route("/api/v1/file", auth(post(api::upload_file)))
+        .route("/api/v1/group/{group_id}", auth(get(get_group_by_id)))
+        .route(
+            "/api/v1/group/{group_id}/key",
+            auth(get(api::get_group_key_by_id)),
+        )
+        .route("/api/v1/group", auth(get(api::get_group_by_members)))
+        .route("/api/v1/group", auth(post(api::create_group)))
+        .route("/api/v1/list-groups", auth(get(api::list_groups)))
         .route("/", get(api::hello))
         .with_state(state);
 
