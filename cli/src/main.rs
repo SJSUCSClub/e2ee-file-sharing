@@ -42,19 +42,22 @@ fn main() {
     // we want to start with $XDG_DATA_HOME
     // and if that doesn't work, fall back to $HOME/.local/share
     // else fall back to $HOME
-    // even though home_dir is still marked as deprecated in 1.85,
-    // the docs say that it's actually fine and will be un-deprecated in 1.86
-    // https://crates.io/crates/home
-    let disk_key_root = env::var("XDG_DATA_HOME").unwrap_or_else(|_| {
+    let disk_key_path_buf = if let Ok(xdg) = env::var("XDG_DATA_HOME") {
+        PathBuf::from(xdg).join("e2ee-file-sharing")
+    } else {
+        // even though home_dir is still marked as deprecated in 1.85,
+        // the docs say that it's actually fine and will be un-deprecated in 1.86
+        // https://crates.io/crates/home
+        #[allow(deprecated)]
         let home = env::home_dir().expect("Inaccessible");
-        if fs::exists(home.join(".local/share")).expect("Inaccessible") {
-            home.join(".local/share").to_str().unwrap().to_string()
+        let local_share = home.join(".local/share");
+        if fs::exists(&local_share).unwrap_or(false) {
+            local_share.join("e2ee-file-sharing")
         } else {
-            home.to_str().unwrap().to_string()
+            home.join(".e2ee-file-sharing")
         }
-    });
-    let disk_key_path = PathBuf::from(disk_key_root).join(".e2ee-file-sharing");
-    let disk_key_path = disk_key_path.as_path();
+    };
+    let disk_key_path = disk_key_path_buf.as_path();
 
     // create directory if it doesn't exist
     std::fs::create_dir_all(disk_key_path).expect("Inaccessible");
