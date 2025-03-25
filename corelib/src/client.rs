@@ -121,8 +121,7 @@ impl PkKeyPair {
     ///
     /// A Result containing the PEM as a String, or an Error
     pub fn get_public_key_pem(&self) -> Result<String, spki::Error>{
-        let x = self.pkpub.clone();
-        x.to_public_key_pem(LineEnding::LF)
+        EncodePublicKey::to_public_key_pem(&self.pkpub, LineEnding::LF)
     }
 
     /// Decrypts a group key with the private key of the user.
