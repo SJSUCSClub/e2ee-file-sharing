@@ -15,6 +15,7 @@ use tokio::sync::{
 };
 use tokio_util::io::ReaderStream;
 
+use crate::db;
 use crate::db::{
     create_group as create_group_db, get_existing_users, get_filename, get_files_for_user_id,
     get_group, get_group_id, get_group_key, get_groups_for_user_id, get_user_id, insert_file,
@@ -49,6 +50,10 @@ pub(crate) enum DatabaseCommand {
         user_email: String,
         user_password_hash: String,
         responder: oneshot::Sender<rusqlite::Result<i64>>,
+    },
+    GetUserKey {
+        user_id: i64,
+        responder: oneshot::Sender<rusqlite::Result<Vec<u8>>>,
     },
     GetFilesForUserId {
         user_id: i64,
@@ -146,7 +151,10 @@ pub(crate) async fn connection_task(conn: Connection, mut rx: mpsc::Receiver<Dat
                     .unwrap();
             }
             GetExistingUsers { users, responder } => {
-                responder.send(get_existing_users(&conn, users)).unwrap()
+                responder.send(get_existing_users(&conn, users)).unwrap();
+            }
+            GetUserKey { user_id, responder } => {
+                responder.send(db::get_user_key(&conn, user_id)).unwrap();
             }
         }
     }
@@ -368,6 +376,57 @@ pub(crate) async fn upload_file(
         }
     }
     (StatusCode::BAD_REQUEST, "No file body provided").into_response()
+}
+
+// ==============================
+// USERS endpoints
+// ==============================
+
+#[derive(Serialize, Deserialize, Debug)]
+pub(crate) struct GetUserInfoResponse {
+    user_id: i64,
+}
+
+pub(crate) async fn get_user_info(
+    Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
+) -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(GetUserInfoResponse { user_id: user_id }),
+    )
+}
+
+#[derive(Deserialize, Debug)]
+pub(crate) struct GetUserKeyQueryParams {
+    target_user_id: i64,
+}
+#[derive(Serialize, Deserialize, Debug)]
+pub(crate) struct GetUserKeyResponse {
+    key: Vec<u8>,
+}
+
+pub(crate) async fn get_user_key(
+    Query(params): Query<GetUserKeyQueryParams>,
+    Extension(_): Extension<UserAuthExtension>,
+    State(st): State<HandlerState>,
+) -> Response {
+    // send request to db thread
+    let (tx, rx) = oneshot::channel();
+    st.tx
+        .send(DatabaseCommand::GetUserKey {
+            user_id: params.target_user_id,
+            responder: tx,
+        })
+        .await
+        .unwrap();
+    let key = match rx.await.unwrap() {
+        Ok(key) => key,
+        Err(e) => {
+            println!("Failed to get user key with {e:?}");
+            return (StatusCode::BAD_REQUEST, "Failed to get user key").into_response();
+        }
+    };
+    (StatusCode::OK, Json(GetUserKeyResponse { key })).into_response()
 }
 
 // ==============================
@@ -668,6 +727,10 @@ mod tests {
     use super::*;
     use corelib::server::{make_salt, salt_password};
 
+    // ==============================
+    // AUTH endpoints
+    // ==============================
+
     #[tokio::test]
     async fn test_hello() {
         let app = Router::new().route("/", get(hello));
@@ -768,6 +831,10 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"User email and password mismatch");
     }
+
+    // ==============================
+    // FILES endpoints
+    // ==============================
 
     #[tokio::test]
     async fn test_list_files() {
@@ -960,6 +1027,97 @@ mod tests {
             .unwrap();
         assert_eq!(contents, "HELLO WORLD");
     }
+
+    // ==============================
+    // USERS endpoints
+    // ==============================
+
+    #[tokio::test]
+    async fn test_get_user_info() {
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_db(&conn).unwrap();
+        // add user
+        let salt = make_salt();
+        let password_hash = salt_password("BACBAC", &salt);
+        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00'), ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00');", params![password_hash, salt]).unwrap();
+
+        // initialize state
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let state = HandlerState {
+            tx,
+            upload_directory: "".to_string(),
+        };
+        tokio::spawn(connection_task(conn, rx));
+
+        // initialize app
+        // build app
+        let mut app = Router::new()
+            .route("/", authenticated(&state, get(get_user_info)))
+            .with_state(state);
+
+        // try request
+        let request = Request::builder()
+            .uri("/?user_email=test@test.com&user_password_hash=BACBAC")
+            .method("GET")
+            .body(Body::empty())
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: GetUserInfoResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.user_id, 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_user_key() {
+        // setup
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_db(&conn).unwrap();
+        // add user
+        let salt = make_salt();
+        let password_hash = salt_password("AABBCC", &salt);
+        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'e0'), ('test2@test.com', X'00', X'00', X'ef'), ('test3@test.com', X'00', X'00', X'ed');", params![password_hash, salt]).unwrap();
+
+        // initialize state
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let state = HandlerState {
+            tx,
+            upload_directory: "".to_string(),
+        };
+        tokio::spawn(connection_task(conn, rx));
+
+        // initialize app
+        // build app
+        let mut app = Router::new()
+            .route("/", authenticated(&state, get(get_user_key)))
+            .with_state(state);
+
+        // try request
+        let request = Request::builder()
+            .uri("/?target_user_id=1&user_email=test@test.com&user_password_hash=AABBCC")
+            .method("GET")
+            .body(Body::empty())
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: GetUserKeyResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.key, vec![0xe0]);
+    }
+
+    // ==============================
+    // GROUP endpoints
+    // ==============================
 
     #[tokio::test]
     async fn test_get_group_by_id() {

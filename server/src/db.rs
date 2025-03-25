@@ -323,6 +323,25 @@ pub fn get_groups_for_user_id(conn: &Connection, user_id: i64) -> Result<Vec<(i6
         .collect()
 }
 
+/// Retrieves the public key for the given user ID
+///
+/// # Arguments
+///
+/// * `conn` - A reference to the SQLite database connection.
+/// * `user_id` - the ID of the user
+///
+/// # Returns
+///
+/// A `Result` containing the user's public key, in bytes
+pub fn get_user_key(conn: &Connection, user_id: i64) -> Result<Vec<u8>> {
+    let sql = "
+        SELECT pk_pub FROM users WHERE id = ?;
+    ";
+    let mut statement = conn.prepare(sql).unwrap();
+
+    statement.query_row(params![user_id], |row| row.get(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,13 +525,13 @@ mod tests {
 
         // should allow different keys for different (user, group) pairs
         let result = get_group_key(&conn, 1, 1).unwrap();
-        assert_eq!(result, vec![0 as u8]);
+        assert_eq!(result, vec![0u8]);
         let result = get_group_key(&conn, 1, 2).unwrap();
-        assert_eq!(result, vec![1 as u8]);
+        assert_eq!(result, vec![1u8]);
         let result = get_group_key(&conn, 2, 1).unwrap();
-        assert_eq!(result, vec![2 as u8]);
+        assert_eq!(result, vec![2u8]);
         let result = get_group_key(&conn, 2, 2).unwrap();
-        assert_eq!(result, vec![3 as u8]);
+        assert_eq!(result, vec![3u8]);
     }
 
     #[test]
@@ -594,7 +613,7 @@ mod tests {
         conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00'), ('test4@test.com', X'00', X'00', X'00');", []).expect("Failed to insert into users");
 
         // create group containing user 1 and user 2
-        let result = create_group(&conn, vec![(1, vec![0 as u8]), (2, vec![1 as u8])]).unwrap();
+        let result = create_group(&conn, vec![(1, vec![0u8]), (2, vec![1u8])]).unwrap();
         assert_eq!(result, 2);
         let user_key = conn
             .query_row(
@@ -603,7 +622,7 @@ mod tests {
                 |row| row.get::<usize, Vec<u8>>(0),
             )
             .unwrap();
-        assert_eq!(user_key, vec![0 as u8]);
+        assert_eq!(user_key, vec![0u8]);
         let user_key = conn
             .query_row(
                 "SELECT encrypted_key FROM groups_user_junction WHERE group_id = 2 AND user_id = 2",
@@ -611,7 +630,7 @@ mod tests {
                 |row| row.get::<usize, Vec<u8>>(0),
             )
             .unwrap();
-        assert_eq!(user_key, vec![1 as u8]);
+        assert_eq!(user_key, vec![1u8]);
     }
 
     #[test]
@@ -641,5 +660,19 @@ mod tests {
         // test nonexistent
         let result = get_groups_for_user_id(&conn, 2).unwrap();
         assert_eq!(result, vec![]);
+    }
+
+    #[test]
+    fn test_get_user_key() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_test_db(&conn);
+
+        let pk_pub = vec![22u8]; // add a second user
+        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', X'02', X'01', ?);", [pk_pub.clone()]).unwrap();
+
+        let result = get_user_key(&conn, 1).unwrap();
+        assert_eq!(result, [0u8]); // the one from setup_test_db
+        let result = get_user_key(&conn, 2).unwrap();
+        assert_eq!(result, pk_pub);
     }
 }
