@@ -27,6 +27,8 @@ async fn main() {
         .route("/api/v1/list-files", auth(get(api::list_files)))
         .route("/api/v1/file", auth(get(api::get_file)))
         .route("/api/v1/file", auth(post(api::upload_file)))
+        .route("/api/v1/user/info", auth(get(api::get_user_info)))
+        .route("api/v1/user/key", auth(get(api::get_user_key)))
         .route("/api/v1/group/{group_id}", auth(get(get_group_by_id)))
         .route(
             "/api/v1/group/{group_id}/key",
