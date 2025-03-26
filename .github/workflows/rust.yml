@@ -32,9 +32,9 @@ jobs:
       - name: Update
         run: rustup update
       - name: Build
-        run: cd corelib && cargo build --verbose
+        run: cd corelib && cargo build
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test
 
   # run server tests
   test-server:
@@ -45,6 +45,6 @@ jobs:
       - name: Update
         run: rustup update
       - name: Build
-        run: cd server && cargo build --verbose
+        run: cd server && cargo build
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test
