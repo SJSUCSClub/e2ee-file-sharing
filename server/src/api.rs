@@ -1,3 +1,8 @@
+use core::str;
+
+use argon2::{password_hash::{self, Salt}, Algorithm, Argon2, Params, Version};
+use corelib::server::make_salt;
+use sha2::{Digest, Sha256, digest::generic_array::GenericArray};
 use axum::{
     Extension, Json,
     body::Body,
@@ -93,6 +98,13 @@ pub(crate) enum DatabaseCommand {
         users: Vec<(i64, String)>,
         responder: oneshot::Sender<rusqlite::Result<Vec<(i64, String)>>>,
     },
+    RegisterUser {
+        user_email: String,
+        user_password_hash: String,
+        salt: String,
+        pub_key: String,
+        responder: oneshot::Sender<rusqlite::Result<i64>>,
+    }
 }
 pub(crate) async fn connection_task(conn: Connection, mut rx: mpsc::Receiver<DatabaseCommand>) {
     use DatabaseCommand::*;
@@ -155,6 +167,13 @@ pub(crate) async fn connection_task(conn: Connection, mut rx: mpsc::Receiver<Dat
             }
             GetUserKey { user_id, responder } => {
                 responder.send(db::get_user_key(&conn, user_id)).unwrap();
+            }
+            RegisterUser { 
+                user_email, 
+                user_password_hash, 
+                salt, pub_key, 
+                responder } => {
+                responder.send(db::register_user(&conn, &user_email, &user_password_hash, &salt, &pub_key)).unwrap();
             }
         }
     }
@@ -427,6 +446,72 @@ pub(crate) async fn get_user_key(
         }
     };
     (StatusCode::OK, Json(GetUserKeyResponse { key })).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct RegisterUser {
+    user_email: String,
+    user_password_hash: String,
+    pub_key: String
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub(crate) struct RegisterUserResponse {
+    id: i64,
+}
+
+/// Produce *PasswordHash2* from the Cryptography Outline.
+///
+/// # Returns
+///
+/// The hash of the passwordhash1, as bytes
+
+pub fn hash_password2(password: Vec<u8>) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(password);
+    hasher.finalize().into()
+}
+
+pub(crate) async fn register_user(
+    Query(params): Query<RegisterUser>,
+    State(st): State<HandlerState>,
+) -> Response {
+
+    let salt = make_salt();
+
+    let salt_str = match str::from_utf8(&salt) {
+        Ok(v) => v,
+        Err(e) => panic!("Invalid UTF-8 sequence: {}", e),
+    }.to_string();
+    let salted = [salt, params.user_password_hash.as_bytes().try_into().unwrap()].concat();
+
+    let hashed_password2 = hash_password2(salted);
+
+    let user_password_hash2 = match str::from_utf8(&hashed_password2) {
+        Ok(v) => v,
+        Err(e) => panic!("Invalid UTF-8 sequence: {}", e),
+    }.to_string();
+
+    // send request to db thread
+    let (tx, rx) = oneshot::channel();
+    st.tx
+        .send(DatabaseCommand::RegisterUser { 
+            user_email: params.user_email, 
+            user_password_hash: user_password_hash2, 
+            salt: salt_str, 
+            pub_key: params.pub_key, 
+            responder: tx 
+        })
+        .await
+        .unwrap();
+    let id = match rx.await.unwrap() {
+        Ok(id) => id,
+        Err(e) => {
+            println!("Failed to register user");
+            return (StatusCode::CONFLICT, "Email is already taken").into_response();
+        }
+    };
+    (StatusCode::OK, Json(RegisterUserResponse { id })).into_response()
 }
 
 // ==============================

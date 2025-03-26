@@ -4154,12 +4154,14 @@ dependencies = [
 name = "server"
 version = "0.1.0"
 dependencies = [
+ "argon2",
  "axum",
  "corelib",
  "http-body-util",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tokio-util",
  "tower",

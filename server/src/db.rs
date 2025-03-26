@@ -2,7 +2,7 @@ pub const DB_NAME: &str = "e2ee-file-sharing.db";
 use std::rc::Rc;
 
 use corelib::server::salt_password;
-use rusqlite::{Connection, Result, params, params_from_iter, types::Value};
+use rusqlite::{params, params_from_iter, types::Value, Connection, Result, Statement};
 
 /// initialize all expected tables within a database connection
 ///
@@ -18,7 +18,8 @@ pub fn init_db(conn: &Connection) -> Result<()> {
         email TEXT NOT NULL,
         password_hash BLOB NOT NULL,
         salt BLOB NOT NULL,
-        pk_pub BLOB NOT NULL
+        pk_pub BLOB NOT NULL,
+        UNIQUE(email)
     );
     CREATE TABLE IF NOT EXISTS groups (
         id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT
@@ -222,6 +223,34 @@ pub fn get_existing_users(
             Ok((row.get(0)?, row.get(1)?))
         })?
         .collect()
+}
+
+/// Inserts the user with the given email and password hash into the database.
+///
+/// # Arguments
+///
+/// * `conn` - A reference to the SQLite database connection.
+/// * `user_email` - The user email.
+/// * `user_password_hash` - The user's salted and hashed password.
+/// * `salt` - The salt (random value used with password to create password hash)
+/// * `pub_key` - The public key for the user
+///
+/// # Returns
+///
+/// A `Result` containing the ID of the newly created user
+pub fn register_user(
+    conn: &Connection,
+    user_email: &str,
+    user_password_hash: &str,
+    salt: &str,
+    pub_key: &str
+) -> Result<i64> {
+    let query: &str = "
+        INSERT INTO users (email, password_hash, salt, pk_pub)
+        VALUES (?, ?, ?, ?)
+        RETURNING id;";
+    let mut statement: Statement<'_>  = conn.prepare(query).expect("User already exists");
+    statement.query_row([user_email, user_password_hash, salt, pub_key], |row| row.get::<usize, i64>(0))
 }
 
 /// Retrieves the group ID for a given list of user IDs.
