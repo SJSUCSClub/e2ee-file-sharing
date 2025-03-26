@@ -241,16 +241,16 @@ pub fn get_existing_users(
 pub fn register_user(
     conn: &Connection,
     user_email: &str,
-    user_password_hash: &str,
-    salt: &str,
-    pub_key: &str
+    user_password_hash: Vec<u8>,
+    salt: [u8; 8],
+    key: Vec<u8>
 ) -> Result<i64> {
     let query: &str = "
         INSERT INTO users (email, password_hash, salt, pk_pub)
         VALUES (?, ?, ?, ?)
         RETURNING id;";
-    let mut statement: Statement<'_>  = conn.prepare(query).expect("User already exists");
-    statement.query_row([user_email, user_password_hash, salt, pub_key], |row| row.get::<usize, i64>(0))
+    let mut statement = conn.prepare(query).expect("Unable to prepare user insert statement");
+    statement.query_row(params![user_email, user_password_hash, salt, key], |row| row.get::<usize, i64>(0))
 }
 
 /// Retrieves the group ID for a given list of user IDs.
