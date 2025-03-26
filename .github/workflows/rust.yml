@@ -34,7 +34,7 @@ jobs:
       - name: Build
         run: cd corelib && cargo build
       - name: Run tests
-        run: cargo test
+        run: cd corelib && cargo test
 
   # run server tests
   test-server:
@@ -47,4 +47,4 @@ jobs:
       - name: Build
         run: cd server && cargo build
       - name: Run tests
-        run: cargo test
+        run: cd server && cargo test
