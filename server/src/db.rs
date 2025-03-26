@@ -2,7 +2,7 @@ pub const DB_NAME: &str = "e2ee-file-sharing.db";
 use std::rc::Rc;
 
 use corelib::server::salt_password;
-use rusqlite::{params, params_from_iter, types::Value, Connection, Result, Statement};
+use rusqlite::{Connection, Result, Statement, params, params_from_iter, types::Value};
 
 /// initialize all expected tables within a database connection
 ///
@@ -243,14 +243,16 @@ pub fn register_user(
     user_email: &str,
     user_password_hash: &str,
     salt: &str,
-    pub_key: &str
+    pub_key: &str,
 ) -> Result<i64> {
     let query: &str = "
         INSERT INTO users (email, password_hash, salt, pk_pub)
         VALUES (?, ?, ?, ?)
         RETURNING id;";
-    let mut statement: Statement<'_>  = conn.prepare(query).expect("User already exists");
-    statement.query_row([user_email, user_password_hash, salt, pub_key], |row| row.get::<usize, i64>(0))
+    let mut statement: Statement<'_> = conn.prepare(query).expect("User already exists");
+    statement.query_row([user_email, user_password_hash, salt, pub_key], |row| {
+        row.get::<usize, i64>(0)
+    })
 }
 
 /// Retrieves the group ID for a given list of user IDs.
@@ -594,9 +596,9 @@ mod tests {
         assert_eq!(
             result,
             vec![
-                (1, "test@test.com".to_string()),
                 (2, "test2@test.com".to_string()),
                 (3, "test3@test.com".to_string()),
+                (1, "test@test.com".to_string()),
             ]
         );
     }
@@ -697,7 +699,7 @@ mod tests {
         setup_test_db(&conn);
 
         let pk_pub = vec![22u8]; // add a second user
-        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', X'02', X'01', ?);", [pk_pub.clone()]).unwrap();
+        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', X'02', X'01', ?);", [pk_pub.clone()]).unwrap();
 
         let result = get_user_key(&conn, 1).unwrap();
         assert_eq!(result, [0u8]); // the one from setup_test_db
