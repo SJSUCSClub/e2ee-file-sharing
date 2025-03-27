@@ -468,7 +468,7 @@ pub(crate) async fn get_group_by_id(
 
     // collect into proper format
     let mut members = Vec::new();
-    for (email, user_id) in group_members {    
+    for (email, user_id) in group_members {
         members.push(GetGroupItem { email, user_id });
     }
 
