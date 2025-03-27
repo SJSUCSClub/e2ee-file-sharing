@@ -4,7 +4,7 @@ use aes_gcm::{
 };
 use argon2::{Algorithm, Argon2, Params, Version};
 use rand::rngs::OsRng;
-use rsa::pkcs8::{spki, DecodePublicKey, EncodePublicKey, LineEnding};
+use rsa::pkcs8::{DecodePublicKey, EncodePublicKey, LineEnding, spki};
 use rsa::{
     Pkcs1v15Encrypt,
     pkcs8::{DecodePrivateKey, EncodePrivateKey},
@@ -120,7 +120,7 @@ impl PkKeyPair {
     /// # Returns
     ///
     /// A Result containing the PEM as a String, or an Error
-    pub fn get_public_key_pem(&self) -> Result<String, spki::Error>{
+    pub fn get_public_key_pem(&self) -> Result<String, spki::Error> {
         EncodePublicKey::to_public_key_pem(&self.pkpub, LineEnding::LF)
     }
 

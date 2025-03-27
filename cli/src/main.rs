@@ -92,7 +92,9 @@ fn main() {
         // create our personal_key and keypair
         let personal_key = PersonalKey::derive(&args.email, &password);
         let kp = PkKeyPair::new();
-        let pk_pub = kp.get_public_key_pem().expect("unable to extract public key");
+        let pk_pub = kp
+            .get_public_key_pem()
+            .expect("unable to extract public key");
         let keys = DiskKeys::new(&personal_key, &kp);
 
         // send registration request
