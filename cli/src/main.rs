@@ -1,6 +1,8 @@
+use base64::prelude::{BASE64_URL_SAFE, Engine as _};
 use clap::{Parser, Subcommand};
-use corelib::client::{DiskKeys, PersonalKey, PkKeyPair};
+use corelib::client::{DiskKeys, EncryptedFile, PersonalKey, PkKeyPair};
 use rpassword::read_password;
+use serde::Deserialize;
 use std::{
     env, fs,
     io::{self, Write},
@@ -32,6 +34,33 @@ enum Subcommands {
         recipients: Vec<String>,
         file: PathBuf,
     },
+    /// Download and decrypt a file from the server
+    Download {
+        /// The ID of the file to download
+        #[arg(short, long)]
+        file_id: i64,
+        /// Path to save the file to
+        /// If not specified, the file will be saved as the filename provided by the server
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+}
+
+// ==============================
+// Request and response structs
+// ==============================
+/// Response from the server containing file information
+#[derive(Deserialize, Debug)]
+struct FileInfoResponse {
+    file_name: String,
+    file_id: i64,
+    group_name: String,
+    group_id: i64,
+}
+
+#[derive(Deserialize, Debug)]
+struct GetGroupKeyResponse {
+    encrypted_key: Vec<u8>,
 }
 
 fn main() {
@@ -133,9 +162,90 @@ fn main() {
     let keys: DiskKeys = postcard::from_bytes(bytes.as_slice()).unwrap();
     let personal_key = PersonalKey::derive(&args.email, &password);
     let kp = keys.to_memory(&personal_key);
+    let encoded_password = BASE64_URL_SAFE.encode(personal_key.hash().to_vec());
+    println!("Encoded keypair is: {}", encoded_password);
 
     // now handle the individual command
     match args.command {
+        Subcommands::Download { file_id, output } => {
+            let client = reqwest::blocking::Client::new();
+            // make request to file info endpoint
+            let resp = client
+                .get(format!(
+                    "{SERVER_URL}/api/v1/file/{file_id}/info?user_email={}&user_password_hash={}",
+                    args.email, encoded_password
+                ))
+                .send()
+                .unwrap();
+            if !resp.status().is_success() {
+                println!("Failed to get file info!");
+                println!("Status code: {}", resp.status());
+                println!(
+                    "Error: {}",
+                    String::from_utf8(resp.bytes().unwrap().to_vec()).unwrap()
+                );
+                return;
+            }
+            // parse the response
+            let info: FileInfoResponse = resp.json().unwrap();
+            println!("Info: {info:#?}");
+
+            let output_path = output.unwrap_or_else(|| {
+                let result = fs::exists(&info.file_name).expect("Inaccessible");
+                if result {
+                    panic!("File already exists!");
+                } else {
+                    PathBuf::from(&info.file_name)
+                }
+            });
+
+            // get group key
+            let resp = client
+                .get(format!(
+                    "{SERVER_URL}/api/v1/group/{}/key?user_email={}&user_password_hash={}",
+                    info.group_id, args.email, encoded_password
+                ))
+                .send()
+                .unwrap();
+            if !resp.status().is_success() {
+                println!("Failed to get group key!");
+                println!("Status code: {}", resp.status());
+                println!(
+                    "Error: {}",
+                    String::from_utf8(resp.bytes().unwrap().to_vec()).unwrap()
+                );
+                return;
+            }
+            let group_key_response: GetGroupKeyResponse = resp.json().unwrap();
+            let group_key = kp.get_group_key(&group_key_response.encrypted_key);
+
+            // make request to file endpoint
+            let resp = client
+                .get(format!(
+                    "{SERVER_URL}/api/v1/file?file_id={file_id}&user_email={}&user_password_hash={}",
+                    args.email,
+                    encoded_password
+                ))
+                .send()
+                .unwrap();
+            if !resp.status().is_success() {
+                println!("Failed to get file!");
+                println!("Status code: {}", resp.status());
+                println!(
+                    "Error: {}",
+                    String::from_utf8(resp.bytes().unwrap().to_vec()).unwrap()
+                );
+                return;
+            }
+            // decrypt bytes
+            let bytes = resp.bytes().unwrap();
+            let encrypted_file: EncryptedFile = postcard::from_bytes(&bytes).unwrap();
+            let bytes = group_key.decrypt_file(&encrypted_file);
+
+            let mut file = fs::File::create(&output_path).expect("Inaccessible");
+            file.write_all(&bytes).unwrap();
+            println!("Downloaded!");
+        }
         _ => todo!(),
     }
 }
