@@ -21,7 +21,8 @@ struct ApiDoc;
 #[tokio::main]
 async fn main() {
     // make db
-    let conn = Connection::open(db::DB_NAME).expect("Failed to open db");
+    let db_filename = env::var("DATABASE").unwrap_or("e2ee-file-sharing.db".to_string());
+    let conn = Connection::open(&db_filename).expect("Failed to open db");
     db::init_db(&conn).expect("Failed to init db");
 
     // make upload directory if necessary

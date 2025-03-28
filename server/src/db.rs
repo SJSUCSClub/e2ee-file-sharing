@@ -1,4 +1,3 @@
-pub const DB_NAME: &str = "e2ee-file-sharing.db";
 use std::rc::Rc;
 
 use corelib::server::salt_password;
