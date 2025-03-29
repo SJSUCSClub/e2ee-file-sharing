@@ -1,8 +1,7 @@
 use core::str;
 
-use base64::{engine::general_purpose, Engine};
+use base64::{Engine, engine::general_purpose};
 
-use corelib::server::{make_salt, salt_password};
 use axum::{
     Extension, Json,
     body::Body,
@@ -11,6 +10,7 @@ use axum::{
     middleware::{self, Next},
     response::{IntoResponse, Response},
 };
+use corelib::server::{make_salt, salt_password};
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -105,7 +105,7 @@ pub(crate) enum DatabaseCommand {
         salt: [u8; 8],
         pub_key: Vec<u8>,
         responder: oneshot::Sender<rusqlite::Result<i64>>,
-    }
+    },
 }
 pub(crate) async fn connection_task(conn: Connection, mut rx: mpsc::Receiver<DatabaseCommand>) {
     use DatabaseCommand::*;
@@ -175,14 +175,22 @@ pub(crate) async fn connection_task(conn: Connection, mut rx: mpsc::Receiver<Dat
             GetUserKey { user_id, responder } => {
                 responder.send(db::get_user_key(&conn, user_id)).unwrap();
             }
-            RegisterUser { 
-                user_email, 
-                user_password_hash, 
-                salt, 
-                pub_key, 
-                responder
+            RegisterUser {
+                user_email,
+                user_password_hash,
+                salt,
+                pub_key,
+                responder,
             } => {
-                responder.send(db::register_user(&conn, &user_email, user_password_hash, salt, pub_key)).unwrap();
+                responder
+                    .send(db::register_user(
+                        &conn,
+                        &user_email,
+                        user_password_hash,
+                        salt,
+                        pub_key,
+                    ))
+                    .unwrap();
             }
         }
     }
@@ -521,7 +529,7 @@ pub(crate) async fn get_user_key(
 pub struct RegisterUser {
     user_email: String,
     user_password_hash: String,
-    key: String
+    key: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -529,30 +537,32 @@ pub(crate) struct RegisterUserResponse {
     id: i64,
 }
 
-
 pub(crate) async fn register_user(
     State(st): State<HandlerState>,
     Json(params): Json<RegisterUser>,
 ) -> Response {
     // first, convert password and key into bytes
-    let password_bytes = general_purpose::STANDARD.decode(&params.user_password_hash).unwrap();
+    let password_bytes = general_purpose::STANDARD
+        .decode(&params.user_password_hash)
+        .unwrap();
     let key_bytes = general_purpose::STANDARD.decode(&params.key).unwrap();
 
     // then, salt and hash the password
     let salt = make_salt();
-    let hashed_password2:Vec<u8> = salt_password(
+    let hashed_password2: Vec<u8> = salt_password(
         &std::str::from_utf8(&password_bytes).expect("Invalid utf8 encoding"),
-        &salt);
+        &salt,
+    );
 
     // send request to db thread
     let (tx, rx) = oneshot::channel();
     st.tx
-        .send(DatabaseCommand::RegisterUser { 
-            user_email: params.user_email, 
-            user_password_hash: hashed_password2, 
-            salt: salt, 
-            pub_key: key_bytes, 
-            responder: tx 
+        .send(DatabaseCommand::RegisterUser {
+            user_email: params.user_email,
+            user_password_hash: hashed_password2,
+            salt: salt,
+            pub_key: key_bytes,
+            responder: tx,
         })
         .await
         .unwrap();
@@ -850,7 +860,9 @@ mod tests {
     use std::{fs, vec};
 
     use axum::{
-        http::{response, Request}, routing::{get, post}, Router
+        Router,
+        http::{Request, response},
+        routing::{get, post},
     };
     use http_body_util::BodyExt;
     use rusqlite::params;
@@ -1812,12 +1824,12 @@ mod tests {
         let body: CreateGroupResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(body.group_id, 1);
     }
-    
+
     #[tokio::test]
     async fn test_register_user() {
         let conn = Connection::open_in_memory().unwrap();
         db::init_db(&conn).unwrap();
-        
+
         // initialize state
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let state = HandlerState {
@@ -1840,8 +1852,9 @@ mod tests {
             "user_email": "test@test.test",
             "user_password_hash": general_purpose::STANDARD.encode(user_password_hash),
             "key": general_purpose::STANDARD.encode(key),
-        }).to_string();
-        
+        })
+        .to_string();
+
         // try request
         let request = Request::builder()
             .uri("/")

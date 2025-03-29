@@ -260,14 +260,18 @@ pub fn register_user(
     user_email: &str,
     user_password_hash: Vec<u8>,
     salt: [u8; 8],
-    key: Vec<u8>
+    key: Vec<u8>,
 ) -> Result<i64> {
     let query: &str = "
         INSERT INTO users (email, password_hash, salt, pk_pub)
         VALUES (?, ?, ?, ?)
         RETURNING id;";
-    let mut statement = conn.prepare(query).expect("Unable to prepare user insert statement");
-    statement.query_row(params![user_email, user_password_hash, salt, key], |row| row.get::<usize, i64>(0))
+    let mut statement = conn
+        .prepare(query)
+        .expect("Unable to prepare user insert statement");
+    statement.query_row(params![user_email, user_password_hash, salt, key], |row| {
+        row.get::<usize, i64>(0)
+    })
 }
 
 /// Retrieves the group ID for a given list of user IDs.
@@ -742,18 +746,16 @@ mod tests {
         let password_hash = b"PASSWORD".to_vec();
         let pwd = password_hash.clone();
 
-        let result = register_user(
-            &conn, 
-            &"email@domain.com", 
-            password_hash, 
-            salt, 
-            vec![22u8]
-        ).unwrap();
+        let result =
+            register_user(&conn, &"email@domain.com", password_hash, salt, vec![22u8]).unwrap();
 
-        let uid:i64 = conn.query_row(
-            "SELECT id FROM users WHERE email = ? AND password_hash = ?;", 
-            params![&"email@domain.com", pwd],
-            |row| row.get::<usize, i64>(0)).unwrap();
+        let uid: i64 = conn
+            .query_row(
+                "SELECT id FROM users WHERE email = ? AND password_hash = ?;",
+                params![&"email@domain.com", pwd],
+                |row| row.get::<usize, i64>(0),
+            )
+            .unwrap();
 
         assert_eq!(result, uid);
     }
