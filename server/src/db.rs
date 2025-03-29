@@ -79,6 +79,40 @@ pub fn get_files_for_user_id(
         .collect()
 }
 
+/// Retrieves the filename, group name, and group ID for a given file ID and user ID.
+///
+/// # Arguments
+///
+/// * `conn` - A reference to the SQLite database connection.
+/// * `user_id` - The ID of the user whose files are to be retrieved.
+/// * `file_id` - The ID of the file to retrieve.
+///
+/// # Returns
+///
+/// A `Result` containing a tuple of the filename, group name, and group ID.
+pub fn get_file_info(
+    conn: &Connection,
+    user_id: i64,
+    file_id: i64,
+) -> Result<(String, String, i64)> {
+    let query = "
+        SELECT f.filename, guj.name, guj.group_id
+        FROM files f
+        JOIN groups_user_junction guj 
+            ON f.group_id = guj.group_id
+        WHERE guj.user_id = ? AND f.file_id = ?;
+    ";
+    let mut statement = conn.prepare(query).expect("unable to prepare query");
+
+    statement.query_row([user_id, file_id], |row| {
+        Ok((
+            row.get::<usize, String>(0)?,
+            row.get::<usize, String>(1)?,
+            row.get::<usize, i64>(2)?,
+        ))
+    })
+}
+
 /// Retrieves the user ID from the database for a given email and password hash.
 ///
 /// This function queries the `users` table to find a user with the specified
@@ -134,23 +168,6 @@ pub fn insert_file(conn: &Connection, group_id: i64, filename: &str) -> Result<i
     ";
     let mut statement = conn.prepare(sql).unwrap();
     statement.query_row(params![group_id, filename], |row| row.get::<usize, i64>(0))
-}
-/// Retrieves the filename associated with a given file ID.
-///
-/// # Arguments
-///
-/// * `conn` - A reference to the SQLite database connection.
-/// * `file_id` - The ID of the file to query.
-///
-/// # Returns
-///
-/// A `Result` containing the filename as a `String`.
-pub fn get_filename(conn: &Connection, file_id: i64) -> Result<String> {
-    let sql = "
-        SELECT filename FROM files WHERE file_id = ?;
-    ";
-    let mut statement = conn.prepare(sql).unwrap();
-    statement.query_row([file_id], |row| row.get::<usize, String>(0))
 }
 
 /// Retrieves a list of all users in the given group.
@@ -488,12 +505,15 @@ mod tests {
         assert!(insert_file(&conn, 2, "test_file.txt").is_err());
     }
     #[test]
-    fn test_get_filename() {
+    fn test_get_file_info() {
         let conn = Connection::open_in_memory().unwrap();
         setup_test_db(&conn);
 
-        let result = get_filename(&conn, 1).unwrap();
-        assert_eq!(result, "test_file.txt");
+        let result = get_file_info(&conn, 1, 1).unwrap();
+        assert_eq!(
+            result,
+            ("test_file.txt".to_string(), "group_name".to_string(), 1)
+        );
 
         // and try with a new one
         conn.execute(
@@ -501,17 +521,25 @@ mod tests {
             [],
         )
         .expect("Failed to insert file");
-        let result = get_filename(&conn, 2).unwrap();
-        assert_eq!(result, "test_file2.txt");
-    }
+        let result = get_file_info(&conn, 1, 2).unwrap();
+        assert_eq!(
+            result,
+            ("test_file2.txt".to_string(), "group_name".to_string(), 1)
+        );
 
-    #[test]
-    fn test_get_filename_nonexistent() {
-        let conn = Connection::open_in_memory().unwrap();
-        setup_test_db(&conn);
-
-        // get nonexistent
-        assert!(get_filename(&conn, 2).is_err());
+        // try getting file info for a file that isn't shared with me
+        conn.execute_batch("
+            INSERT INTO groups (id) VALUES (NULL);
+            INSERT INTO users (email, salt, password_hash, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00');
+            INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (2, 2, 'second', X'00');
+            INSERT INTO files (group_id, filename) VALUES (2, 'privatefile');
+        ").expect("Failed to insert items");
+        // user 2 should be able to get it
+        let result = get_file_info(&conn, 2, 3).unwrap();
+        assert_eq!(result, ("privatefile".to_string(), "second".to_string(), 2));
+        // and user 1 shouldn't
+        let result = get_file_info(&conn, 1, 3);
+        assert!(result.is_err());
     }
 
     #[test]

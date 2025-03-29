@@ -1,0 +1,50 @@
+name: Test
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # format files
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check formatting
+        run: cargo fmt
+      # commit formatting changes
+      - name: Commit formatting changes
+        uses: stefanzweifel/git-auto-commit-action@v4
+        with:
+          commit_message: "auto format rust code"
+
+  # run corelib tests
+  test-corelib:
+    needs: format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update
+        run: rustup update
+      - name: Build
+        run: cd corelib && cargo build
+      - name: Run tests
+        run: cd corelib && cargo test
+
+  # run server tests
+  test-server:
+    needs: format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update
+        run: rustup update
+      - name: Build
+        run: cd server && cargo build
+      - name: Run tests
+        run: cd server && cargo test

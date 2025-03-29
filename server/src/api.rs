@@ -22,8 +22,8 @@ use tokio_util::io::ReaderStream;
 
 use crate::db;
 use crate::db::{
-    create_group as create_group_db, get_existing_users, get_filename, get_files_for_user_id,
-    get_group, get_group_id, get_group_key, get_groups_for_user_id, get_user_id, insert_file,
+    create_group as create_group_db, get_existing_users, get_files_for_user_id, get_group,
+    get_group_id, get_group_key, get_groups_for_user_id, get_user_id, insert_file,
 };
 
 // ==============================
@@ -64,14 +64,15 @@ pub(crate) enum DatabaseCommand {
         user_id: i64,
         responder: oneshot::Sender<rusqlite::Result<Vec<(String, i64, String, i64)>>>,
     },
-    GetFilename {
-        file_id: i64,
-        responder: oneshot::Sender<rusqlite::Result<String>>,
-    },
     InsertFile {
         group_id: i64,
         filename: String,
         responder: oneshot::Sender<rusqlite::Result<i64>>,
+    },
+    GetFileInfo {
+        file_id: i64,
+        user_id: i64,
+        responder: oneshot::Sender<rusqlite::Result<(String, String, i64)>>,
     },
     GetGroupById {
         group_id: i64,
@@ -124,8 +125,14 @@ pub(crate) async fn connection_task(conn: Connection, mut rx: mpsc::Receiver<Dat
                     .send(get_files_for_user_id(&conn, user_id))
                     .unwrap();
             }
-            GetFilename { file_id, responder } => {
-                responder.send(get_filename(&conn, file_id)).unwrap();
+            GetFileInfo {
+                file_id,
+                user_id,
+                responder,
+            } => {
+                responder
+                    .send(db::get_file_info(&conn, user_id, file_id))
+                    .unwrap();
             }
             InsertFile {
                 group_id,
@@ -300,24 +307,30 @@ pub(crate) struct GetFileQueryParams {
 pub(crate) async fn get_file(
     Query(params): Query<GetFileQueryParams>,
     State(st): State<HandlerState>,
+    Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
 ) -> Response {
     // authentication succeeded, proceed to get the file storage location
     // first, initialize request to the connection thread
     let (tx, rx) = oneshot::channel();
     st.tx
-        .send(DatabaseCommand::GetFilename {
+        .send(DatabaseCommand::GetFileInfo {
             file_id: params.file_id,
+            user_id,
             responder: tx,
         })
         .await
         .unwrap();
 
     // and the file name
-    let file_name = match rx.await.unwrap() {
-        Ok(file_name) => file_name,
+    let info = match rx.await.unwrap() {
+        Ok(info) => info,
         Err(e) => {
-            println!("Failed to get filename {e:?}");
-            return (StatusCode::BAD_REQUEST, "Failed to get filename").into_response();
+            println!("Nonexistent file or permission denied {e:?}");
+            return (
+                StatusCode::BAD_REQUEST,
+                "Nonexistent file or permission denied",
+            )
+                .into_response();
         }
     };
     let path = to_path(&st.upload_directory, params.file_id);
@@ -337,7 +350,7 @@ pub(crate) async fn get_file(
         (header::CONTENT_TYPE, "application/octet-stream"),
         (
             header::CONTENT_DISPOSITION,
-            &format!("attachment; filename={file_name}"),
+            &format!("attachment; filename={}", info.0),
         ),
     ];
 
@@ -358,8 +371,29 @@ pub(crate) struct UploadFileResponse {
 pub(crate) async fn upload_file(
     Query(params): Query<UploadFileQueryParams>,
     State(st): State<HandlerState>,
+    Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
     mut multipart: Multipart,
 ) -> Response {
+    // check if user is in the group
+    let (tx, rx) = oneshot::channel();
+    st.tx
+        .send(DatabaseCommand::GetGroupById {
+            group_id: params.group_id,
+            responder: tx,
+        })
+        .await
+        .unwrap();
+    let group = match rx.await.unwrap() {
+        Ok(group) => group,
+        Err(e) => {
+            println!("Failed to get group {e:?}");
+            return (StatusCode::BAD_REQUEST, "Failed to get group").into_response();
+        }
+    };
+    if !group.iter().any(|user| user.1 == user_id) {
+        return (StatusCode::BAD_REQUEST, "User not in group").into_response();
+    }
+
     while let Some(field) = multipart.next_field().await.unwrap() {
         let file_name = field.file_name().unwrap().to_string();
         let data = field.bytes().await.unwrap();
@@ -397,6 +431,39 @@ pub(crate) async fn upload_file(
         }
     }
     (StatusCode::BAD_REQUEST, "No file body provided").into_response()
+}
+
+pub(crate) async fn get_file_info(
+    Path(file_id): Path<i64>,
+    Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
+    State(st): State<HandlerState>,
+) -> Response {
+    // send request to db thread
+    let (tx, rx) = oneshot::channel();
+    st.tx
+        .send(DatabaseCommand::GetFileInfo {
+            file_id: file_id,
+            user_id: user_id,
+            responder: tx,
+        })
+        .await
+        .unwrap();
+    match rx.await.unwrap() {
+        Ok(info) => (
+            StatusCode::OK,
+            Json(ListFilesItem {
+                file_name: info.0,
+                file_id,
+                group_name: info.1,
+                group_id: info.2,
+            }),
+        )
+            .into_response(),
+        Err(e) => {
+            println!("Failed to get file info with err {e:?}");
+            (StatusCode::BAD_REQUEST, "No such file or user not in group").into_response()
+        }
+    }
 }
 
 // ==============================
@@ -994,14 +1061,25 @@ mod tests {
         let salt = make_salt();
         let password_hash = salt_password("3F2A33", &salt);
         conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![password_hash, salt]).unwrap();
-        conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
-            .unwrap();
-        conn.execute(
-            "INSERT INTO files (group_id, filename) VALUES (1, 'test_file.txt');",
-            [],
-        )
-        .unwrap();
+        conn.execute_batch("
+            INSERT INTO groups (id) VALUES (NULL);
+            INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 1, 'group_name', X'00');
+            INSERT INTO files (group_id, filename) VALUES (1, 'test_file.txt');
+        ").unwrap();
+        // and make another user and group
+        let salt = make_salt();
+        let password_hash = salt_password("3F2A33", &salt);
+        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', ?, ?, X'00');", params![password_hash, salt]).unwrap();
+        conn.execute_batch("
+            INSERT INTO groups (id) VALUES (NULL);
+            INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (2, 2, 'second', X'00');
+            INSERT INTO files (group_id, filename) VALUES (2, 'test_file2.txt');
+        ").unwrap();
+
         tokio::fs::write(to_path(upload_directory, 1), "HI THERE")
+            .await
+            .unwrap();
+        tokio::fs::write(to_path(upload_directory, 2), "SECOND FILE")
             .await
             .unwrap();
         // initialize state
@@ -1033,6 +1111,36 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
 
         assert_eq!(&body[..], b"HI THERE");
+
+        // try request for file that user shouldn't have access to
+        // should be bad request
+        let request = Request::builder()
+            .uri("/?user_email=test@test.com&user_password_hash=3F2A33&file_id=2")
+            .method("GET")
+            .body(Body::empty())
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        // and finally request for the file with user2
+        let request = Request::builder()
+            .uri("/?user_email=test2@test.com&user_password_hash=3F2A33&file_id=2")
+            .method("GET")
+            .body(Body::empty())
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"SECOND FILE");
     }
 
     struct TestUploadFileCleaner {}
@@ -1054,8 +1162,12 @@ mod tests {
         let salt = make_salt();
         let password_hash = salt_password("3F2A33", &salt);
         conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![password_hash, salt]).unwrap();
-        conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
-            .unwrap();
+        // add group and add dummy user
+        conn.execute_batch("
+            INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00');
+            INSERT INTO groups (id) VALUES (NULL), (NULL);
+            INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 1, 'group_name', X'00'), (2, 2, 'second', X'00');
+        ").unwrap();
         // initialize state
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let state = HandlerState {
@@ -1095,6 +1207,84 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(contents, "HELLO WORLD");
+
+        // and try request to group id that user is not a part of
+        let request = Request::builder()
+            .uri("/?user_email=test@test.com&user_password_hash=3F2A33&group_id=2")
+            .method("POST")
+            .header(
+                header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={}", "MYBOUNDARY"),
+            )
+            .body(Body::from(data))
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_get_file_info() {
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_db(&conn).unwrap();
+        // add user
+        let salt = make_salt();
+        let password_hash = salt_password("BACBAC", &salt);
+        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![password_hash, salt]).unwrap();
+        conn.execute_batch("
+            INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00');
+            INSERT INTO groups (id) VALUES (NULL), (NULL);
+            INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 1, 'group_name', X'00'), (2, 2, 'second', X'00');
+            INSERT INTO files (group_id, filename) VALUES (1, 'test_file.txt'), (2, 'test_file2.txt');
+        ").unwrap();
+
+        // initialize state
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let state = HandlerState {
+            tx,
+            upload_directory: "".to_string(),
+        };
+        tokio::spawn(connection_task(conn, rx));
+
+        // build app
+        let mut app = Router::new()
+            .route("/{file_id}", authenticated(&state, get(get_file_info)))
+            .with_state(state);
+
+        // try properly authenticated request
+        let request = Request::builder()
+            .uri("/1?user_email=test@test.com&user_password_hash=BACBAC")
+            .method("GET")
+            .body(Body::empty())
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: ListFilesItem = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.file_name, "test_file.txt");
+
+        // and try request to file id that user is not a part of
+        let request = Request::builder()
+            .uri("/2?user_email=test@test.com&user_password_hash=BACBAC")
+            .method("GET")
+            .body(Body::empty())
+            .unwrap();
+        let response = ServiceExt::<Request<Body>>::ready(&mut app)
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     // ==============================

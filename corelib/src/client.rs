@@ -4,7 +4,7 @@ use aes_gcm::{
 };
 use argon2::{Algorithm, Argon2, Params, Version};
 use rand::rngs::OsRng;
-use rsa::pkcs8::{DecodePublicKey, EncodePublicKey};
+use rsa::pkcs8::{DecodePublicKey, EncodePublicKey, LineEnding, spki};
 use rsa::{
     Pkcs1v15Encrypt,
     pkcs8::{DecodePrivateKey, EncodePrivateKey},
@@ -112,6 +112,16 @@ impl PkKeyPair {
             pkpub: pub_key,
             pkpriv: priv_key,
         }
+    }
+
+    /// Convert the public key to PEM
+    /// This is needed to then serialize the Public Key in order to send to the server
+    ///
+    /// # Returns
+    ///
+    /// A Result containing the PEM as a String, or an Error
+    pub fn get_public_key_pem(&self) -> Result<String, spki::Error> {
+        EncodePublicKey::to_public_key_pem(&self.pkpub, LineEnding::LF)
     }
 
     /// Decrypts a group key with the private key of the user.
