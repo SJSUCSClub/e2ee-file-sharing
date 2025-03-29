@@ -704,4 +704,29 @@ mod tests {
         let result = get_user_key(&conn, 2).unwrap();
         assert_eq!(result, pk_pub);
     }
+
+    #[test]
+    fn test_register_user() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_test_db(&conn);
+
+        let salt: [u8; 8] = [0; 8];
+        let password_hash = b"PASSWORD".to_vec();
+        let pwd = password_hash.clone();
+
+        let result = register_user(
+            &conn, 
+            &"email@domain.com", 
+            password_hash, 
+            salt, 
+            vec![22u8]
+        ).unwrap();
+
+        let uid:i64 = conn.query_row(
+            "SELECT id FROM users WHERE email = ? AND password_hash = ?;", 
+            params![&"email@domain.com", pwd],
+            |row| row.get::<usize, i64>(0)).unwrap();
+
+        assert_eq!(result, uid);
+    }
 }

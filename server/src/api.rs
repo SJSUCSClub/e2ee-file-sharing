@@ -1,5 +1,7 @@
 use core::str;
 
+use base64::{engine::general_purpose, Engine};
+
 use corelib::server::{make_salt, salt_password};
 use axum::{
     Extension, Json,
@@ -451,8 +453,8 @@ pub(crate) async fn get_user_key(
 #[derive(Deserialize)]
 pub struct RegisterUser {
     user_email: String,
-    user_password_hash: Vec<u8>,
-    key: Vec<u8>
+    user_password_hash: String,
+    key: String
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -462,13 +464,17 @@ pub(crate) struct RegisterUserResponse {
 
 
 pub(crate) async fn register_user(
-    Query(params): Query<RegisterUser>,
     State(st): State<HandlerState>,
+    Json(params): Json<RegisterUser>,
 ) -> Response {
-    // first, create a salt 
+    // first, convert password and key into bytes
+    let password_bytes = general_purpose::STANDARD.decode(&params.user_password_hash).unwrap();
+    let key_bytes = general_purpose::STANDARD.decode(&params.key).unwrap();
+
+    // then, salt and hash the password
     let salt = make_salt();
     let hashed_password2:Vec<u8> = salt_password(
-        &std::str::from_utf8(&params.user_password_hash).expect("Invalid utf8 encoding"),
+        &std::str::from_utf8(&password_bytes).expect("Invalid utf8 encoding"),
         &salt);
 
     // send request to db thread
@@ -478,7 +484,7 @@ pub(crate) async fn register_user(
             user_email: params.user_email, 
             user_password_hash: hashed_password2, 
             salt: salt, 
-            pub_key: params.key, 
+            pub_key: key_bytes, 
             responder: tx 
         })
         .await
@@ -777,12 +783,11 @@ mod tests {
     use std::{fs, vec};
 
     use axum::{
-        Router,
-        http::Request,
-        routing::{get, post},
+        http::{response, Request}, routing::{get, post}, Router
     };
     use http_body_util::BodyExt;
     use rusqlite::params;
+    use serde_json::{from_slice, json};
     // for .collect() for the response
     use tower::{Service, ServiceExt}; // for .oneshot
 
@@ -1616,5 +1621,50 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let body: CreateGroupResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(body.group_id, 1);
+    }
+    
+    #[tokio::test]
+    async fn test_register_user() {
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_db(&conn).unwrap();
+        
+        // initialize state
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let state = HandlerState {
+            tx,
+            upload_directory: "".to_string(),
+        };
+        tokio::spawn(connection_task(conn, rx));
+
+        // initialize app
+        // build app
+        let mut app = Router::new()
+            .route("/", post(register_user))
+            .with_state(state);
+
+        // create user parameters
+        let user_password_hash: Vec<u8> = b"PASSWORD".to_vec();
+        let key: Vec<u8> = b"PKPUB".to_vec();
+
+        let body = json!({
+            "user_email": "test@test.test",
+            "user_password_hash": general_purpose::STANDARD.encode(user_password_hash),
+            "key": general_purpose::STANDARD.encode(key),
+        }).to_string();
+        
+        // try request
+        let request = Request::builder()
+            .uri("/")
+            .method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let response_user: RegisterUserResponse = from_slice(&body).unwrap();
+        assert!(response_user.id > 0);
     }
 }
