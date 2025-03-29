@@ -2,7 +2,7 @@ pub const DB_NAME: &str = "e2ee-file-sharing.db";
 use std::rc::Rc;
 
 use corelib::server::salt_password;
-use rusqlite::{Connection, Result, Statement, params, params_from_iter, types::Value};
+use rusqlite::{Connection, Result, params, params_from_iter, types::Value};
 
 /// initialize all expected tables within a database connection
 ///

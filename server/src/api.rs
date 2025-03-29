@@ -1,5 +1,3 @@
-use core::str;
-
 use base64::{Engine, engine::general_purpose};
 
 use axum::{
@@ -1840,7 +1838,7 @@ mod tests {
 
         // initialize app
         // build app
-        let mut app = Router::new()
+        let app = Router::new()
             .route("/", post(register_user))
             .with_state(state);
 
