@@ -18,7 +18,8 @@ pub fn init_db(conn: &Connection) -> Result<()> {
         email TEXT NOT NULL,
         password_hash BLOB NOT NULL,
         salt BLOB NOT NULL,
-        pk_pub BLOB NOT NULL
+        pk_pub BLOB NOT NULL,
+        UNIQUE(email)
     );
     CREATE TABLE IF NOT EXISTS groups (
         id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT
@@ -239,6 +240,38 @@ pub fn get_existing_users(
             Ok((row.get(0)?, row.get(1)?))
         })?
         .collect()
+}
+
+/// Inserts the user with the given email and password hash into the database.
+///
+/// # Arguments
+///
+/// * `conn` - A reference to the SQLite database connection.
+/// * `user_email` - The user email.
+/// * `user_password_hash` - The user's salted and hashed password.
+/// * `salt` - The salt (random value used with password to create password hash)
+/// * `pub_key` - The public key for the user
+///
+/// # Returns
+///
+/// A `Result` containing the ID of the newly created user
+pub fn register_user(
+    conn: &Connection,
+    user_email: &str,
+    user_password_hash: Vec<u8>,
+    salt: [u8; 8],
+    key: Vec<u8>,
+) -> Result<i64> {
+    let query: &str = "
+        INSERT INTO users (email, password_hash, salt, pk_pub)
+        VALUES (?, ?, ?, ?)
+        RETURNING id;";
+    let mut statement = conn
+        .prepare(query)
+        .expect("Unable to prepare user insert statement");
+    statement.query_row(params![user_email, user_password_hash, salt, key], |row| {
+        row.get::<usize, i64>(0)
+    })
 }
 
 /// Retrieves the group ID for a given list of user IDs.
@@ -593,9 +626,9 @@ mod tests {
         assert_eq!(
             result,
             vec![
-                (1, "test@test.com".to_string()),
                 (2, "test2@test.com".to_string()),
                 (3, "test3@test.com".to_string()),
+                (1, "test@test.com".to_string()),
             ]
         );
     }
@@ -696,11 +729,34 @@ mod tests {
         setup_test_db(&conn);
 
         let pk_pub = vec![22u8]; // add a second user
-        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', X'02', X'01', ?);", [pk_pub.clone()]).unwrap();
+        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', X'02', X'01', ?);", [pk_pub.clone()]).unwrap();
 
         let result = get_user_key(&conn, 1).unwrap();
         assert_eq!(result, [0u8]); // the one from setup_test_db
         let result = get_user_key(&conn, 2).unwrap();
         assert_eq!(result, pk_pub);
+    }
+
+    #[test]
+    fn test_register_user() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_test_db(&conn);
+
+        let salt: [u8; 8] = [0; 8];
+        let password_hash = b"PASSWORD".to_vec();
+        let pwd = password_hash.clone();
+
+        let result =
+            register_user(&conn, &"email@domain.com", password_hash, salt, vec![22u8]).unwrap();
+
+        let uid: i64 = conn
+            .query_row(
+                "SELECT id FROM users WHERE email = ? AND password_hash = ?;",
+                params![&"email@domain.com", pwd],
+                |row| row.get::<usize, i64>(0),
+            )
+            .unwrap();
+
+        assert_eq!(result, uid);
     }
 }
