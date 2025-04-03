@@ -1,10 +1,7 @@
 use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE, Engine as _};
 use clap::{Parser, Subcommand};
 use corelib::client::{DiskKeys, EncryptedFile, GroupKey, PersonalKey, PkKeyPair};
-use reqwest::{
-    StatusCode,
-    blocking::multipart,
-};
+use reqwest::{StatusCode, blocking::multipart};
 use rpassword::read_password;
 use rsa::pkcs8::DecodePublicKey;
 use serde::{Deserialize, Serialize};
@@ -224,7 +221,7 @@ fn main() {
     let personal_key = PersonalKey::derive(&args.email, &password);
     let kp = keys.to_memory(&personal_key);
     let encoded_password = BASE64_URL_SAFE.encode(personal_key.hash().to_vec());
-    
+
     // double check that password is correct
     // by fetching to user info endpoint
     let client = reqwest::blocking::Client::new();
@@ -272,7 +269,7 @@ fn main() {
             }
             // parse the response
             let info: FileInfoResponse = resp.json().unwrap();
-            
+
             let output_path = output.unwrap_or_else(|| {
                 let result = fs::exists(&info.file_name).expect("Inaccessible");
                 if result {
@@ -352,7 +349,6 @@ fn main() {
                 // add ourself to the list
                 emails.push(args.email.clone());
                 ids.push(user_id);
-                
                 // make request to get group id
                 let mut members = Vec::new();
                 for (email, id) in emails.into_iter().zip(ids.iter()) {
