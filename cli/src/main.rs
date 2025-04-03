@@ -333,11 +333,17 @@ fn main() {
             mut ids,
         } => {
             // first, double check that the file exists
-            if !fs::exists(&file).expect("Inaccessible") {
+            if !file.try_exists().expect("Inaccessible") {
                 // doesn't exist
                 println!("File does not exist!");
                 return;
             }
+            // and that it's a file, not a directory
+            if !file.is_file() {
+                println!("Not a file!");
+                return;
+            }
+
             // exists, so now need the recipients
             let client = reqwest::blocking::Client::new();
             // get group id and key
@@ -447,12 +453,11 @@ fn main() {
             let group_key_response: GetGroupKeyResponse = resp.json().unwrap();
             let group_key = kp.get_group_key(&group_key_response.encrypted_key);
             // encrypt file
-            let bytes = fs::read(file).unwrap();
+            let bytes = fs::read(&file).unwrap();
             let encrypted_file = group_key.encrypt_file(&bytes);
             // make request to upload endpoint
-            // TODO - actually get file name
             let file_part = multipart::Part::bytes(postcard::to_allocvec(&encrypted_file).unwrap())
-                .file_name("file")
+                .file_name(file.file_name().unwrap().to_str().unwrap().to_string())
                 .mime_str("application/octet-stream")
                 .unwrap();
             let form = multipart::Form::new().part("file_field", file_part);
