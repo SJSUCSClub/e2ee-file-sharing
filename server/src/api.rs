@@ -1,5 +1,3 @@
-use base64::{Engine, engine::general_purpose};
-
 use axum::{
     Extension, Json,
     body::Body,
@@ -8,6 +6,7 @@ use axum::{
     middleware::{self, Next},
     response::{IntoResponse, Response},
 };
+use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE, Engine as _};
 use corelib::server::{make_salt, salt_password};
 
 use rusqlite::Connection;
@@ -51,7 +50,7 @@ pub(crate) struct HandlerState {
 pub(crate) enum DatabaseCommand {
     GetUserId {
         user_email: String,
-        user_password_hash: String,
+        user_password_hash: Vec<u8>,
         responder: oneshot::Sender<rusqlite::Result<i64>>,
     },
     GetUserKey {
@@ -115,7 +114,11 @@ pub(crate) async fn connection_task(conn: Connection, mut rx: mpsc::Receiver<Dat
                 responder,
             } => {
                 responder
-                    .send(get_user_id(&conn, &user_email, &user_password_hash))
+                    .send(get_user_id(
+                        &conn,
+                        &user_email,
+                        user_password_hash.as_slice(),
+                    ))
                     .unwrap();
             }
             GetFilesForUserId { user_id, responder } => {
@@ -213,11 +216,14 @@ pub(crate) async fn user_auth(
     next: Next,
 ) -> Response {
     // send request
+    let decoded_password = BASE64_URL_SAFE
+        .decode(params.user_password_hash)
+        .expect("Failed to decode user password hash");
     let (tx, rx) = oneshot::channel();
     st.tx
         .send(DatabaseCommand::GetUserId {
             user_email: params.user_email,
-            user_password_hash: params.user_password_hash,
+            user_password_hash: decoded_password,
             responder: tx,
         })
         .await
@@ -540,17 +546,12 @@ pub(crate) async fn register_user(
     Json(params): Json<RegisterUser>,
 ) -> Response {
     // first, convert password and key into bytes
-    let password_bytes = general_purpose::STANDARD
-        .decode(&params.user_password_hash)
-        .unwrap();
-    let key_bytes = general_purpose::STANDARD.decode(&params.key).unwrap();
+    let password_bytes = BASE64_STANDARD.decode(&params.user_password_hash).unwrap();
+    let key_bytes = BASE64_STANDARD.decode(&params.key).unwrap();
 
     // then, salt and hash the password
     let salt = make_salt();
-    let hashed_password2: Vec<u8> = salt_password(
-        &std::str::from_utf8(&password_bytes).expect("Invalid utf8 encoding"),
-        &salt,
-    );
+    let hashed_password2: Vec<u8> = salt_password(password_bytes.as_slice(), &salt);
 
     // send request to db thread
     let (tx, rx) = oneshot::channel();
@@ -567,7 +568,7 @@ pub(crate) async fn register_user(
     let id = match rx.await.unwrap() {
         Ok(id) => id,
         Err(e) => {
-            println!("Failed to register user");
+            println!("Failed to register user with {e:?}");
             return (StatusCode::CONFLICT, "Email is already taken").into_response();
         }
     };
@@ -859,7 +860,7 @@ mod tests {
 
     use axum::{
         Router,
-        http::{Request, response},
+        http::Request,
         routing::{get, post},
     };
     use http_body_util::BodyExt;
@@ -907,7 +908,7 @@ mod tests {
         db::init_db(&conn).unwrap();
         // and add an initial user
         let salt = make_salt();
-        let password_hash = salt_password("3F2A33", &salt);
+        let password_hash = salt_password(b"3F2A33", &salt);
         conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![password_hash, salt]).unwrap();
         // initialize state
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -989,7 +990,7 @@ mod tests {
         db::init_db(&conn).unwrap();
         // and add an initial user and such
         let salt = make_salt();
-        let password_hash = salt_password("3F2A33", &salt);
+        let password_hash = salt_password(b"3F2A33", &salt);
         conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![password_hash, salt]).unwrap();
         conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
             .unwrap();
@@ -1069,7 +1070,7 @@ mod tests {
         tokio::fs::create_dir_all(upload_directory).await.unwrap();
         // and add an initial user and such
         let salt = make_salt();
-        let password_hash = salt_password("3F2A33", &salt);
+        let password_hash = salt_password(b"3F2A33", &salt);
         conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![password_hash, salt]).unwrap();
         conn.execute_batch("
             INSERT INTO groups (id) VALUES (NULL);
@@ -1078,7 +1079,7 @@ mod tests {
         ").unwrap();
         // and make another user and group
         let salt = make_salt();
-        let password_hash = salt_password("3F2A33", &salt);
+        let password_hash = salt_password(b"3F2A33", &salt);
         conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', ?, ?, X'00');", params![password_hash, salt]).unwrap();
         conn.execute_batch("
             INSERT INTO groups (id) VALUES (NULL);
@@ -1170,7 +1171,7 @@ mod tests {
         tokio::fs::create_dir_all(upload_directory).await.unwrap();
         // and add an initial user and such
         let salt = make_salt();
-        let password_hash = salt_password("3F2A33", &salt);
+        let password_hash = salt_password(b"3F2A33", &salt);
         conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![password_hash, salt]).unwrap();
         // add group and add dummy user
         conn.execute_batch("
@@ -1243,7 +1244,7 @@ mod tests {
         db::init_db(&conn).unwrap();
         // add user
         let salt = make_salt();
-        let password_hash = salt_password("BACBAC", &salt);
+        let password_hash = salt_password(b"BACBAC", &salt);
         conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![password_hash, salt]).unwrap();
         conn.execute_batch("
             INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00');
@@ -1307,7 +1308,7 @@ mod tests {
         db::init_db(&conn).unwrap();
         // add user
         let salt = make_salt();
-        let password_hash = salt_password("BACBAC", &salt);
+        let password_hash = salt_password(b"BACBAC", &salt);
         conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00'), ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00');", params![password_hash, salt]).unwrap();
 
         // initialize state
@@ -1349,7 +1350,7 @@ mod tests {
         db::init_db(&conn).unwrap();
         // add user
         let salt = make_salt();
-        let password_hash = salt_password("AABBCC", &salt);
+        let password_hash = salt_password(b"AABBCC", &salt);
         conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'e0'), ('test2@test.com', X'00', X'00', X'ef'), ('test3@test.com', X'00', X'00', X'ed');", params![password_hash, salt]).unwrap();
 
         // initialize state
@@ -1395,7 +1396,7 @@ mod tests {
         db::init_db(&conn).unwrap();
         // add several users and a group
         let salt = make_salt();
-        let password_hash = salt_password("AABBCC", &salt);
+        let password_hash = salt_password(b"AABBCC", &salt);
         conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00'), ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00');", params![password_hash, salt]).unwrap();
         conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
             .unwrap();
@@ -1473,7 +1474,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         db::init_db(&conn).unwrap();
         let salt = make_salt();
-        let password_hash = salt_password("AABBCC", &salt);
+        let password_hash = salt_password(b"AABBCC", &salt);
         conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00'), ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00');", params![password_hash, salt]).unwrap();
         conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
             .unwrap();
@@ -1555,7 +1556,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         db::init_db(&conn).unwrap();
         let salt = make_salt();
-        let password_hash = salt_password("AABBCC", &salt);
+        let password_hash = salt_password(b"AABBCC", &salt);
 
         conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00'), ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00');", params![&password_hash, &salt]).unwrap();
         conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
@@ -1664,7 +1665,7 @@ mod tests {
         let conn = Connection::open("/tmp/test_create_group.db").unwrap();
         db::init_db(&conn).unwrap();
         let salt = make_salt();
-        let password_hash = salt_password("AABBCC", &salt);
+        let password_hash = salt_password(b"AABBCC", &salt);
         conn.execute("INSERT INTO users (email, salt, password_hash, pk_pub) VALUES ('test@test.com', ?, ?, X'00'), ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00');", params![salt, password_hash]).unwrap();
 
         // initialize state
@@ -1848,8 +1849,8 @@ mod tests {
 
         let body = json!({
             "user_email": "test@test.test",
-            "user_password_hash": general_purpose::STANDARD.encode(user_password_hash),
-            "key": general_purpose::STANDARD.encode(key),
+            "user_password_hash": BASE64_STANDARD.encode(user_password_hash),
+            "key": BASE64_STANDARD.encode(key),
         })
         .to_string();
 

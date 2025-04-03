@@ -23,7 +23,7 @@ pub fn make_salt() -> [u8; 8] {
 /// # Returns
 ///
 /// The hashed password, as bytes
-pub fn salt_password(password: &str, salt: &[u8]) -> Vec<u8> {
+pub fn salt_password(password: &[u8], salt: &[u8]) -> Vec<u8> {
     let mut hasher = sha2::Sha256::new();
     hasher.update(password);
     hasher.update(&salt);
@@ -36,7 +36,7 @@ mod tests {
 
     #[test]
     fn test_salt_password() {
-        let password = "password123";
+        let password = b"password123";
         let salt = make_salt();
         let salted_password = salt_password(password, &salt);
         let salted_password_2 = salt_password(password, &salt);
