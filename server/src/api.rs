@@ -1,5 +1,3 @@
-use base64::{Engine, engine::general_purpose};
-
 use axum::{
     Extension, Json,
     body::Body,
@@ -8,6 +6,7 @@ use axum::{
     middleware::{self, Next},
     response::{IntoResponse, Response},
 };
+use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE, Engine as _};
 use corelib::server::{make_salt, salt_password};
 
 use rusqlite::Connection;
@@ -51,7 +50,7 @@ pub(crate) struct HandlerState {
 pub(crate) enum DatabaseCommand {
     GetUserId {
         user_email: String,
-        user_password_hash: String,
+        user_password_hash: Vec<u8>,
         responder: oneshot::Sender<rusqlite::Result<i64>>,
     },
     GetUserKey {
@@ -115,7 +114,11 @@ pub(crate) async fn connection_task(conn: Connection, mut rx: mpsc::Receiver<Dat
                 responder,
             } => {
                 responder
-                    .send(get_user_id(&conn, &user_email, &user_password_hash))
+                    .send(get_user_id(
+                        &conn,
+                        &user_email,
+                        user_password_hash.as_slice(),
+                    ))
                     .unwrap();
             }
             GetFilesForUserId { user_id, responder } => {
@@ -213,11 +216,14 @@ pub(crate) async fn user_auth(
     next: Next,
 ) -> Response {
     // send request
+    let decoded_password = BASE64_URL_SAFE
+        .decode(params.user_password_hash)
+        .expect("Failed to decode user password hash");
     let (tx, rx) = oneshot::channel();
     st.tx
         .send(DatabaseCommand::GetUserId {
             user_email: params.user_email,
-            user_password_hash: params.user_password_hash,
+            user_password_hash: decoded_password,
             responder: tx,
         })
         .await
@@ -540,17 +546,12 @@ pub(crate) async fn register_user(
     Json(params): Json<RegisterUser>,
 ) -> Response {
     // first, convert password and key into bytes
-    let password_bytes = general_purpose::STANDARD
-        .decode(&params.user_password_hash)
-        .unwrap();
-    let key_bytes = general_purpose::STANDARD.decode(&params.key).unwrap();
+    let password_bytes = BASE64_STANDARD.decode(&params.user_password_hash).unwrap();
+    let key_bytes = BASE64_STANDARD.decode(&params.key).unwrap();
 
     // then, salt and hash the password
     let salt = make_salt();
-    let hashed_password2: Vec<u8> = salt_password(
-        &std::str::from_utf8(&password_bytes).expect("Invalid utf8 encoding"),
-        &salt,
-    );
+    let hashed_password2: Vec<u8> = salt_password(password_bytes.as_slice(), &salt);
 
     // send request to db thread
     let (tx, rx) = oneshot::channel();
@@ -567,7 +568,7 @@ pub(crate) async fn register_user(
     let id = match rx.await.unwrap() {
         Ok(id) => id,
         Err(e) => {
-            println!("Failed to register user");
+            println!("Failed to register user with {e:?}");
             return (StatusCode::CONFLICT, "Email is already taken").into_response();
         }
     };
@@ -859,7 +860,7 @@ mod tests {
 
     use axum::{
         Router,
-        http::{Request, response},
+        http::Request,
         routing::{get, post},
     };
     use http_body_util::BodyExt;
@@ -907,8 +908,10 @@ mod tests {
         db::init_db(&conn).unwrap();
         // and add an initial user
         let salt = make_salt();
-        let password_hash = salt_password("3F2A33", &salt);
-        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![password_hash, salt]).unwrap();
+        let user_password_hash = vec![1u8, 22u8, 33u8, 7u8];
+        let server_password_hash = salt_password(&user_password_hash, &salt);
+        let encoded_password_hash = BASE64_URL_SAFE.encode(&user_password_hash);
+        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![server_password_hash, salt]).unwrap();
         // initialize state
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let state = HandlerState {
@@ -924,7 +927,9 @@ mod tests {
 
         // try properly authenticated request
         let request = Request::builder()
-            .uri("/?user_email=test@test.com&user_password_hash=3F2A33")
+            .uri(format!(
+                "/?user_email=test@test.com&user_password_hash={encoded_password_hash}"
+            ))
             .method("GET")
             .body(Body::empty())
             .unwrap();
@@ -948,7 +953,9 @@ mod tests {
 
         // and try improperly authenticated requests
         let request = Request::builder()
-            .uri("/?user_email=wrongemail@test.com&user_password_hash=3F2A33")
+            .uri(format!(
+                "/?user_email=wrongemail@test.com&user_password_hash={encoded_password_hash}"
+            ))
             .method("GET")
             .body(Body::empty())
             .unwrap();
@@ -962,8 +969,12 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"User email and password mismatch");
 
+        let wrong_password_hash = vec![2u8, 22u8, 33u8, 7u8];
+        let wrong_encoded_password_hash = BASE64_URL_SAFE.encode(&wrong_password_hash);
         let request = Request::builder()
-            .uri("/?user_email=test@test.com&user_password_hash=3F2A3322")
+            .uri(format!(
+                "/?user_email=test@test.com&user_password_hash={wrong_encoded_password_hash}"
+            ))
             .method("GET")
             .body(Body::empty())
             .unwrap();
@@ -989,8 +1000,10 @@ mod tests {
         db::init_db(&conn).unwrap();
         // and add an initial user and such
         let salt = make_salt();
-        let password_hash = salt_password("3F2A33", &salt);
-        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![password_hash, salt]).unwrap();
+        let user_password_hash = b"3F2A33".to_vec();
+        let server_password_hash = salt_password(&user_password_hash, &salt);
+        let encoded_password_hash = BASE64_URL_SAFE.encode(&user_password_hash);
+        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![server_password_hash, salt]).unwrap();
         conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
             .unwrap();
         conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 1, 'group_name', X'00');", []).unwrap();
@@ -1019,7 +1032,9 @@ mod tests {
 
         // try properly authenticated request
         let request = Request::builder()
-            .uri("/?user_email=test@test.com&user_password_hash=3F2A33")
+            .uri(format!(
+                "/?user_email=test@test.com&user_password_hash={encoded_password_hash}"
+            ))
             .method("GET")
             .body(Body::empty())
             .unwrap();
@@ -1069,8 +1084,10 @@ mod tests {
         tokio::fs::create_dir_all(upload_directory).await.unwrap();
         // and add an initial user and such
         let salt = make_salt();
-        let password_hash = salt_password("3F2A33", &salt);
-        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![password_hash, salt]).unwrap();
+        let user_password_hash = vec![1u8, 128u8, 77u8, 14u8, 33u8];
+        let encoded_password_hash = BASE64_URL_SAFE.encode(&user_password_hash);
+        let server_password_hash = salt_password(&user_password_hash, &salt);
+        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![server_password_hash, salt]).unwrap();
         conn.execute_batch("
             INSERT INTO groups (id) VALUES (NULL);
             INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 1, 'group_name', X'00');
@@ -1078,8 +1095,10 @@ mod tests {
         ").unwrap();
         // and make another user and group
         let salt = make_salt();
-        let password_hash = salt_password("3F2A33", &salt);
-        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', ?, ?, X'00');", params![password_hash, salt]).unwrap();
+        let user_password_hash = vec![22u8, 32u8, 218u8, 25u8, 99u8];
+        let encoded_password_hash2 = BASE64_URL_SAFE.encode(&user_password_hash);
+        let server_password_hash = salt_password(&user_password_hash, &salt);
+        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', ?, ?, X'00');", params![server_password_hash, salt]).unwrap();
         conn.execute_batch("
             INSERT INTO groups (id) VALUES (NULL);
             INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (2, 2, 'second', X'00');
@@ -1107,7 +1126,9 @@ mod tests {
 
         // try properly authenticated request
         let request = Request::builder()
-            .uri("/?user_email=test@test.com&user_password_hash=3F2A33&file_id=1")
+            .uri(format!(
+                "/?user_email=test@test.com&user_password_hash={encoded_password_hash}&file_id=1"
+            ))
             .method("GET")
             .body(Body::empty())
             .unwrap();
@@ -1125,7 +1146,9 @@ mod tests {
         // try request for file that user shouldn't have access to
         // should be bad request
         let request = Request::builder()
-            .uri("/?user_email=test@test.com&user_password_hash=3F2A33&file_id=2")
+            .uri(format!(
+                "/?user_email=test@test.com&user_password_hash={encoded_password_hash}&file_id=2"
+            ))
             .method("GET")
             .body(Body::empty())
             .unwrap();
@@ -1138,7 +1161,9 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         // and finally request for the file with user2
         let request = Request::builder()
-            .uri("/?user_email=test2@test.com&user_password_hash=3F2A33&file_id=2")
+            .uri(format!(
+                "/?user_email=test2@test.com&user_password_hash={encoded_password_hash2}&file_id=2"
+            ))
             .method("GET")
             .body(Body::empty())
             .unwrap();
@@ -1170,8 +1195,10 @@ mod tests {
         tokio::fs::create_dir_all(upload_directory).await.unwrap();
         // and add an initial user and such
         let salt = make_salt();
-        let password_hash = salt_password("3F2A33", &salt);
-        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![password_hash, salt]).unwrap();
+        let user_password_hash = vec![3u8, 15u8, 2u8, 10u8, 3u8, 3u8];
+        let server_password_hash = salt_password(&user_password_hash, &salt);
+        let encoded_password_hash = BASE64_URL_SAFE.encode(&user_password_hash);
+        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![server_password_hash, salt]).unwrap();
         // add group and add dummy user
         conn.execute_batch("
             INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00');
@@ -1195,7 +1222,9 @@ mod tests {
         // make request body
         let data = "--MYBOUNDARY\r\nContent-Disposition: form-data; name=\"test\"; filename=\"test.txt\"\r\nContent-Type: text/plain\r\n\r\nHELLO WORLD\r\n--MYBOUNDARY\r\n";
         let request = Request::builder()
-            .uri("/?user_email=test@test.com&user_password_hash=3F2A33&group_id=1")
+            .uri(format!(
+                "/?user_email=test@test.com&user_password_hash={encoded_password_hash}&group_id=1"
+            ))
             .method("POST")
             .header(
                 header::CONTENT_TYPE,
@@ -1220,7 +1249,9 @@ mod tests {
 
         // and try request to group id that user is not a part of
         let request = Request::builder()
-            .uri("/?user_email=test@test.com&user_password_hash=3F2A33&group_id=2")
+            .uri(format!(
+                "/?user_email=test@test.com&user_password_hash={encoded_password_hash}&group_id=2"
+            ))
             .method("POST")
             .header(
                 header::CONTENT_TYPE,
@@ -1243,8 +1274,10 @@ mod tests {
         db::init_db(&conn).unwrap();
         // add user
         let salt = make_salt();
-        let password_hash = salt_password("BACBAC", &salt);
-        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![password_hash, salt]).unwrap();
+        let user_password_hash = vec![11u8, 10u8, 12u8, 11u8, 10u8, 12u8];
+        let server_password_hash = salt_password(&user_password_hash, &salt);
+        let encoded_password_hash = BASE64_URL_SAFE.encode(&user_password_hash);
+        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![server_password_hash, salt]).unwrap();
         conn.execute_batch("
             INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00');
             INSERT INTO groups (id) VALUES (NULL), (NULL);
@@ -1267,7 +1300,9 @@ mod tests {
 
         // try properly authenticated request
         let request = Request::builder()
-            .uri("/1?user_email=test@test.com&user_password_hash=BACBAC")
+            .uri(format!(
+                "/1?user_email=test@test.com&user_password_hash={encoded_password_hash}"
+            ))
             .method("GET")
             .body(Body::empty())
             .unwrap();
@@ -1284,7 +1319,9 @@ mod tests {
 
         // and try request to file id that user is not a part of
         let request = Request::builder()
-            .uri("/2?user_email=test@test.com&user_password_hash=BACBAC")
+            .uri(format!(
+                "/2?user_email=test@test.com&user_password_hash={encoded_password_hash}"
+            ))
             .method("GET")
             .body(Body::empty())
             .unwrap();
@@ -1307,7 +1344,9 @@ mod tests {
         db::init_db(&conn).unwrap();
         // add user
         let salt = make_salt();
-        let password_hash = salt_password("BACBAC", &salt);
+        let user_password_hash = vec![12u8, 8u8, 4u8, 13u8, 7u8, 2u8];
+        let password_hash = salt_password(&user_password_hash, &salt);
+        let encoded_password_hash = BASE64_URL_SAFE.encode(&user_password_hash);
         conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00'), ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00');", params![password_hash, salt]).unwrap();
 
         // initialize state
@@ -1326,7 +1365,9 @@ mod tests {
 
         // try request
         let request = Request::builder()
-            .uri("/?user_email=test@test.com&user_password_hash=BACBAC")
+            .uri(format!(
+                "/?user_email=test@test.com&user_password_hash={encoded_password_hash}"
+            ))
             .method("GET")
             .body(Body::empty())
             .unwrap();
@@ -1349,7 +1390,9 @@ mod tests {
         db::init_db(&conn).unwrap();
         // add user
         let salt = make_salt();
-        let password_hash = salt_password("AABBCC", &salt);
+        let user_password_hash = vec![12u8, 12u8, 13u8, 13u8, 7u8, 7u8];
+        let password_hash = salt_password(&user_password_hash, &salt);
+        let encoded_password_hash = BASE64_URL_SAFE.encode(&user_password_hash);
         conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'e0'), ('test2@test.com', X'00', X'00', X'ef'), ('test3@test.com', X'00', X'00', X'ed');", params![password_hash, salt]).unwrap();
 
         // initialize state
@@ -1368,7 +1411,7 @@ mod tests {
 
         // try request
         let request = Request::builder()
-            .uri("/?target_user_id=1&user_email=test@test.com&user_password_hash=AABBCC")
+            .uri(format!("/?target_user_id=1&user_email=test@test.com&user_password_hash={encoded_password_hash}"))
             .method("GET")
             .body(Body::empty())
             .unwrap();
@@ -1395,7 +1438,9 @@ mod tests {
         db::init_db(&conn).unwrap();
         // add several users and a group
         let salt = make_salt();
-        let password_hash = salt_password("AABBCC", &salt);
+        let user_password_hash = vec![12u8, 12u8, 13u8, 13u8, 7u8, 7u8];
+        let password_hash = salt_password(&user_password_hash, &salt);
+        let encoded_password_hash = BASE64_URL_SAFE.encode(&user_password_hash);
         conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00'), ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00');", params![password_hash, salt]).unwrap();
         conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
             .unwrap();
@@ -1419,7 +1464,9 @@ mod tests {
 
         // try properly authenticated request
         let request = Request::builder()
-            .uri("/1?user_email=test@test.com&user_password_hash=AABBCC")
+            .uri(format!(
+                "/1?user_email=test@test.com&user_password_hash={encoded_password_hash}"
+            ))
             .method("GET")
             .body(Body::empty())
             .unwrap();
@@ -1453,7 +1500,9 @@ mod tests {
 
         // try unauthenticated request
         let request = Request::builder()
-            .uri("/2?user_email=test@test.com&user_password_hash=AABBCC")
+            .uri(format!(
+                "/2?user_email=test@test.com&user_password_hash={encoded_password_hash}"
+            ))
             .method("GET")
             .body(Body::empty())
             .unwrap();
@@ -1473,7 +1522,9 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         db::init_db(&conn).unwrap();
         let salt = make_salt();
-        let password_hash = salt_password("AABBCC", &salt);
+        let user_password_hash = vec![12u8, 12u8, 13u8, 13u8, 7u8, 7u8];
+        let password_hash = salt_password(&user_password_hash, &salt);
+        let encoded_password_hash = BASE64_URL_SAFE.encode(&user_password_hash);
         conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00'), ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00');", params![password_hash, salt]).unwrap();
         conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
             .unwrap();
@@ -1501,7 +1552,9 @@ mod tests {
 
         // try properly authenticated request
         let request = Request::builder()
-            .uri("/1/key?user_email=test@test.com&user_password_hash=AABBCC")
+            .uri(format!(
+                "/1/key?user_email=test@test.com&user_password_hash={encoded_password_hash}"
+            ))
             .method("GET")
             .body(Body::empty())
             .unwrap();
@@ -1518,7 +1571,9 @@ mod tests {
 
         // try request to group that user is not part of
         let request = Request::builder()
-            .uri("/2/key?user_email=test@test.com&user_password_hash=AABBCC")
+            .uri(format!(
+                "/2/key?user_email=test@test.com&user_password_hash={encoded_password_hash}"
+            ))
             .method("GET")
             .body(Body::empty())
             .unwrap();
@@ -1534,7 +1589,9 @@ mod tests {
 
         // try request to group where group key is a "
         let request = Request::builder()
-            .uri("/3/key?user_email=test@test.com&user_password_hash=AABBCC")
+            .uri(format!(
+                "/3/key?user_email=test@test.com&user_password_hash={encoded_password_hash}"
+            ))
             .method("GET")
             .body(Body::empty())
             .unwrap();
@@ -1555,7 +1612,9 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         db::init_db(&conn).unwrap();
         let salt = make_salt();
-        let password_hash = salt_password("AABBCC", &salt);
+        let user_password_hash = vec![12u8, 8u8, 4u8, 13u8, 7u8, 2u8];
+        let password_hash = salt_password(&user_password_hash, &salt);
+        let encoded_password_hash = BASE64_URL_SAFE.encode(&user_password_hash);
 
         conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00'), ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00');", params![&password_hash, &salt]).unwrap();
         conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
@@ -1580,7 +1639,9 @@ mod tests {
         // try properly authenticated request
         let body = "{\"members\":[{\"user_id\":1,\"email\":\"test@test.com\"},{\"user_id\":2,\"email\":\"test2@test.com\"},{\"user_id\":3,\"email\":\"test3@test.com\"}]}";
         let request = Request::builder()
-            .uri("/?user_email=test@test.com&user_password_hash=AABBCC")
+            .uri(format!(
+                "/?user_email=test@test.com&user_password_hash={encoded_password_hash}"
+            ))
             .header("Content-Type", "application/json")
             .method("GET")
             .body(Body::from(body))
@@ -1599,7 +1660,9 @@ mod tests {
         // try one where the group doesn't exist
         let body = "{\"members\":[{\"user_id\":1,\"email\":\"test@test.com\"},{\"user_id\":2,\"email\":\"test2@test.com\"}]}";
         let request = Request::builder()
-            .uri("/?user_email=test@test.com&user_password_hash=AABBCC")
+            .uri(format!(
+                "/?user_email=test@test.com&user_password_hash={encoded_password_hash}"
+            ))
             .header("Content-Type", "application/json")
             .method("GET")
             .body(Body::from(body))
@@ -1617,7 +1680,9 @@ mod tests {
         // try one where not all users exist
         let body = "{\"members\":[{\"user_id\":1,\"email\":\"test@test.com\"},{\"user_id\":2,\"email\":\"test2@test.com\"}, {\"user_id\":3,\"email\":\"test3@test.com\"}, {\"user_id\":4,\"email\":\"test4@test.com\"}]}";
         let request = Request::builder()
-            .uri("/?user_email=test@test.com&user_password_hash=AABBCC")
+            .uri(format!(
+                "/?user_email=test@test.com&user_password_hash={encoded_password_hash}"
+            ))
             .header("Content-Type", "application/json")
             .method("GET")
             .body(Body::from(body))
@@ -1635,7 +1700,9 @@ mod tests {
         // try one group exists but user not in it
         let body = "{\"members\":[{\"user_id\":2,\"email\":\"test2@test.com\"}, {\"user_id\":3,\"email\":\"test3@test.com\"}]}";
         let request = Request::builder()
-            .uri("/?user_email=test@test.com&user_password_hash=AABBCC")
+            .uri(format!(
+                "/?user_email=test@test.com&user_password_hash={encoded_password_hash}"
+            ))
             .header("Content-Type", "application/json")
             .method("GET")
             .body(Body::from(body))
@@ -1664,7 +1731,9 @@ mod tests {
         let conn = Connection::open("/tmp/test_create_group.db").unwrap();
         db::init_db(&conn).unwrap();
         let salt = make_salt();
-        let password_hash = salt_password("AABBCC", &salt);
+        let user_password_hash = vec![12u8, 12u8, 13u8, 13u8, 7u8, 7u8];
+        let password_hash = salt_password(&user_password_hash, &salt);
+        let encoded_password_hash = BASE64_URL_SAFE.encode(&user_password_hash);
         conn.execute("INSERT INTO users (email, salt, password_hash, pk_pub) VALUES ('test@test.com', ?, ?, X'00'), ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00');", params![salt, password_hash]).unwrap();
 
         // initialize state
@@ -1699,7 +1768,9 @@ mod tests {
         };
         let request_body = serde_json::to_string(&request_body).unwrap();
         let request = Request::builder()
-            .uri("/?user_email=test@test.com&user_password_hash=AABBCC")
+            .uri(format!(
+                "/?user_email=test@test.com&user_password_hash={encoded_password_hash}"
+            ))
             .header("Content-Type", "application/json")
             .method("POST")
             .body(Body::from(request_body))
@@ -1749,7 +1820,9 @@ mod tests {
         };
         let request_body = serde_json::to_string(&request_body).unwrap();
         let request = Request::builder()
-            .uri("/?user_email=test@test.com&user_password_hash=AABBCC")
+            .uri(format!(
+                "/?user_email=test@test.com&user_password_hash={encoded_password_hash}"
+            ))
             .header("Content-Type", "application/json")
             .method("POST")
             .body(Body::from(request_body))
@@ -1774,7 +1847,9 @@ mod tests {
         };
         let request_body = serde_json::to_string(&request_body).unwrap();
         let request = Request::builder()
-            .uri("/?user_email=test@test.com&user_password_hash=AABBCC")
+            .uri(format!(
+                "/?user_email=test@test.com&user_password_hash={encoded_password_hash}"
+            ))
             .header("Content-Type", "application/json")
             .method("POST")
             .body(Body::from(request_body))
@@ -1806,7 +1881,9 @@ mod tests {
         };
         let request_body = serde_json::to_string(&request_body).unwrap();
         let request = Request::builder()
-            .uri("/?user_email=test@test.com&user_password_hash=AABBCC")
+            .uri(format!(
+                "/?user_email=test@test.com&user_password_hash={encoded_password_hash}"
+            ))
             .header("Content-Type", "application/json")
             .method("POST")
             .body(Body::from(request_body))
@@ -1848,8 +1925,8 @@ mod tests {
 
         let body = json!({
             "user_email": "test@test.test",
-            "user_password_hash": general_purpose::STANDARD.encode(user_password_hash),
-            "key": general_purpose::STANDARD.encode(key),
+            "user_password_hash": BASE64_STANDARD.encode(user_password_hash),
+            "key": BASE64_STANDARD.encode(key),
         })
         .to_string();
 

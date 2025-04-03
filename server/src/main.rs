@@ -13,16 +13,24 @@ use rusqlite::Connection;
 
 #[tokio::main]
 async fn main() {
+    // make db
     let conn = Connection::open(db::DB_NAME).expect("Failed to open db");
     db::init_db(&conn).expect("Failed to init db");
+
+    // make upload directory if necessary
+    let upload_directory = env::var("UPLOAD_DIRECTORY").unwrap_or("/tmp/e2ee-fs".to_string());
+    tokio::fs::create_dir_all(&upload_directory).await.unwrap();
+
+    // initialize state
     let (tx, rx) = tokio::sync::mpsc::channel(32);
     let state = HandlerState {
         tx,
-        upload_directory: env::var("UPLOAD_DIRECTORY").unwrap_or("/tmp/e2ee-fs".to_string()),
+        upload_directory,
     };
     let _ = tokio::spawn(connection_task(conn, rx));
     let auth = |a| authenticated(&state, a);
 
+    // make app
     let app = Router::new()
         .route("/api/v1/list-files", auth(get(api::list_files)))
         .route("/api/v1/file", auth(get(api::get_file)))
@@ -31,7 +39,10 @@ async fn main() {
         .route("/api/v1/user/info", auth(get(api::get_user_info)))
         .route("/api/v1/user/key", auth(get(api::get_user_key)))
         .route("/api/v1/user", post(api::register_user))
-        .route("/api/v1/group/{group_id}", auth(get(get_group_by_id)))
+        .route(
+            "/api/v1/group/{group_id}/members",
+            auth(get(get_group_by_id)),
+        )
         .route(
             "/api/v1/group/{group_id}/key",
             auth(get(api::get_group_key_by_id)),
@@ -42,8 +53,8 @@ async fn main() {
         .route("/", get(api::hello))
         .with_state(state);
 
+    // start server
     let bind_addr = std::env::var("EFS_SERVER_LISTEN").unwrap_or("127.0.0.1:8091".to_string());
-
     let listener = tokio::net::TcpListener::bind(bind_addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }

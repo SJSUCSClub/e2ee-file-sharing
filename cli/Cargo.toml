@@ -4,9 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+base64 = "0.22.1"
 clap = { version = "4.5.32", features = ["derive"] }
 corelib = { version = "0.1.0", path = "../corelib" }
 postcard = { version = "1.1.1", features = ["use-std"] }
-reqwest = { version = "0.12.15", features = ["blocking"] }
+reqwest = { version = "0.12.15", features = ["blocking", "json", "multipart"] }
 rpassword = "7.3.1"
+rsa = "0.9.8"
+serde = "1.0.219"
 serde_json = "1.0.140"

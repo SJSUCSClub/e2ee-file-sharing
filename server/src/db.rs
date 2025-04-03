@@ -128,26 +128,21 @@ pub fn get_file_info(
 ///
 /// A `Result` containing the user ID as an `i64` if the user is found, or an
 /// error if the user cannot be authenticated.
-pub fn get_user_id(conn: &Connection, user_email: &str, user_password_hash: &str) -> Result<i64> {
+pub fn get_user_id(conn: &Connection, user_email: &str, user_password_hash: &[u8]) -> Result<i64> {
     // first, fetch the salt
     let query = "
         SELECT salt FROM users WHERE email = ?;
     ";
     let mut statement = conn.prepare(query).expect("Unable to prepare salt query");
     let salt = statement.query_row(params![user_email], |row| row.get::<usize, Vec<u8>>(0))?;
+    let hashed_password = salt_password(user_password_hash, salt.as_slice());
 
     // then attempt to fetch the matching id
     let query = "
         SELECT id FROM users WHERE email = ? AND password_hash = ?;
     ";
     let mut statement = conn.prepare(query).expect("unable to prepare query");
-    statement.query_row(
-        params![
-            user_email,
-            salt_password(user_password_hash, salt.as_slice())
-        ],
-        |row| row.get(0),
-    )
+    statement.query_row(params![user_email, hashed_password], |row| row.get(0))
 }
 
 /// Inserts a file into the database.
@@ -403,7 +398,7 @@ mod tests {
 
         // create fake records
         let salt = make_salt();
-        let password_hash = salt_password("00", &salt);
+        let password_hash = salt_password(b"00", &salt);
         conn.execute(
             "INSERT INTO users (email, salt, password_hash, pk_pub) VALUES ('test@test.com', ?, ?, X'00');",
             params![salt, password_hash],
@@ -457,18 +452,18 @@ mod tests {
         setup_test_db(&conn);
 
         // get user id for 'test'
-        let result = get_user_id(&conn, "test@test.com", "00").unwrap();
+        let result = get_user_id(&conn, "test@test.com", b"00").unwrap();
         assert_eq!(result, 1);
 
         // try with another
         let salt = make_salt();
-        let password_hash = salt_password("AFF3", &salt);
+        let password_hash = salt_password(b"AFF3", &salt);
         conn.execute(
             "INSERT INTO users(email, password_hash, salt, pk_pub) VALUES ('test2@test2.com', ?, ?, X'00');",
             params![password_hash, salt],
         )
         .expect("Failed to execute insert");
-        let result2 = get_user_id(&conn, "test2@test2.com", "AFF3").unwrap();
+        let result2 = get_user_id(&conn, "test2@test2.com", b"AFF3").unwrap();
         assert_eq!(result2, 2);
     }
     #[test]
@@ -477,7 +472,7 @@ mod tests {
         setup_test_db(&conn);
 
         // get user id for nonexistent person
-        assert!(get_user_id(&conn, "test@test.com", "01").is_err());
+        assert!(get_user_id(&conn, "test@test.com", b"01").is_err());
     }
     #[test]
     fn test_get_user_id_mismatch_email() {
@@ -485,7 +480,7 @@ mod tests {
         setup_test_db(&conn);
 
         // get user id for nonexistent person
-        assert!(get_user_id(&conn, "nest@test.com", "00").is_err());
+        assert!(get_user_id(&conn, "nest@test.com", b"00").is_err());
     }
     #[test]
     fn test_insert_file() {
