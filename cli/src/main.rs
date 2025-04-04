@@ -126,7 +126,7 @@ fn main() {
                 file_id,
                 output,
             ) {
-                println!("Failed to donload file: {e}");
+                println!("Failed to download file: {e}");
             } else {
                 println!("Download successful!");
             }
