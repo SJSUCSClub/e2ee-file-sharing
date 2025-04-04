@@ -530,7 +530,7 @@ pub(crate) async fn get_user_key(
 }
 
 #[derive(Deserialize)]
-pub struct RegisterUser {
+pub(crate) struct RegisterUser {
     user_email: String,
     user_password_hash: String,
     key: String,
@@ -655,7 +655,7 @@ pub(crate) async fn get_group_key_by_id(
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub(crate) struct GetGroupsByMembersResponse {
+pub(crate) struct GetGroupByMembersResponse {
     group_id: i64,
 }
 pub(crate) async fn get_group_by_members(
@@ -710,11 +710,9 @@ pub(crate) async fn get_group_by_members(
 
     // return either the group id or a 404
     match group_id {
-        Some(group_id) => (
-            StatusCode::OK,
-            Json(GetGroupsByMembersResponse { group_id }),
-        )
-            .into_response(),
+        Some(group_id) => {
+            (StatusCode::OK, Json(GetGroupByMembersResponse { group_id })).into_response()
+        }
         None => (StatusCode::NOT_FOUND, "No such group exists").into_response(),
     }
 }
@@ -1654,7 +1652,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let body: GetGroupsByMembersResponse = serde_json::from_slice(&body).unwrap();
+        let body: GetGroupByMembersResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(body.group_id, 1);
 
         // try one where the group doesn't exist
