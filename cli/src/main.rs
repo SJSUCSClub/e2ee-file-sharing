@@ -87,13 +87,15 @@ fn main() {
     // create directory if it doesn't exist
     std::fs::create_dir_all(disk_key_path).expect("Inaccessible");
 
+    // get password
     let password = args.password.unwrap_or_else(|| {
         print!("Password: ");
         io::stdout().flush().unwrap();
         read_password().unwrap()
     });
 
-    // register, which may do stuff
+    // register is a special case that we need to handle
+    // before the others since the user SHOULDN'T exist yet
     if let Subcommands::Register {} = args.command {
         if let Err(e) = register(SERVER_URL, &args.email, &password, disk_key_path) {
             println!("Failed to register: {e}");
@@ -103,6 +105,7 @@ fn main() {
         return;
     }
 
+    // retrieve kp and validate user by using email and password
     let (kp, encoded_password, user_id) =
         match get_user_info(SERVER_URL, &args.email, &password, disk_key_path) {
             Ok((kp, encoded_password, user_id)) => (kp, encoded_password, user_id),

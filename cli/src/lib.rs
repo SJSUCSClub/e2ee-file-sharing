@@ -125,6 +125,46 @@ pub fn register(
     Ok(())
 }
 
+/// Fetches the group key from the server
+/// and decrypts it using the user's private key
+///
+/// # Arguments
+///
+/// * `server_url` - The URL of the server
+/// * `email` - The email of the user
+/// * `encoded_password` - The encoded password of the user
+/// * `group_id` - The id of the group
+/// * `kp` - The user's key pair
+/// * `client` - The client to use to make requests
+///
+/// # Returns
+///
+/// A `Result` containing the group key
+fn get_group_key(
+    server_url: &str,
+    email: &str,
+    encoded_password: &str,
+    group_id: i64,
+    kp: &PkKeyPair,
+    client: &reqwest::blocking::Client,
+) -> Result<GroupKey, Box<dyn Error>> {
+    let resp = client
+        .get(format!(
+            "{server_url}/api/v1/group/{group_id}/key?user_email={email}&user_password_hash={encoded_password}",
+        ))
+        .send()?;
+    if !resp.status().is_success() {
+        return Err(Box::from(format!(
+            "Server responded to group key request with:\nStatus: {}\nResponse: {}",
+            resp.status(),
+            resp.text()?
+        )));
+    }
+    let group_key_response: GetGroupKeyResponse = resp.json()?;
+    let group_key = kp.get_group_key(&group_key_response.encrypted_key);
+    Ok(group_key)
+}
+
 /// Downloads a file from the server by using
 /// the provided id and decrypts it using the user's private key
 /// and the group's key, saving it to the provided path.
@@ -176,21 +216,14 @@ pub fn download(
     };
 
     // get group key
-    let resp = client
-        .get(format!(
-            "{server_url}/api/v1/group/{}/key?user_email={email}&user_password_hash={encoded_password}",
-            info.group_id,
-        ))
-        .send()?;
-    if !resp.status().is_success() {
-        return Err(Box::from(format!(
-            "Server responded to group key request with:\nStatus: {}\nResponse: {}",
-            resp.status(),
-            resp.text()?
-        )));
-    }
-    let group_key_response: GetGroupKeyResponse = resp.json()?;
-    let group_key = kp.get_group_key(&group_key_response.encrypted_key);
+    let group_key = get_group_key(
+        server_url,
+        email,
+        encoded_password,
+        info.group_id,
+        kp,
+        &client,
+    )?;
 
     // make request to file endpoint
     let resp = client
@@ -256,8 +289,7 @@ fn create_group(
         pkpubs.push(pkpub);
     }
     // create group for all users
-    let pkpub_refs = pkpubs.iter().collect::<Vec<_>>();
-    let group = GroupKey::make_encrypted_group_keys(&pkpub_refs);
+    let group = GroupKey::make_encrypted_group_keys(&pkpubs);
     let members = members
         .members
         .into_iter()
@@ -284,6 +316,69 @@ fn create_group(
     }
     let group_id_response: CreateGroupResponse = resp.json()?;
     Ok(group_id_response.group_id)
+}
+
+/// Gets or creates a group on the server and returns the group id
+/// Attempts to get the group first, then creates it if it doesn't exist
+///
+/// # Arguments
+///
+/// * `server_url` - the url of the server
+/// * `email` - the email of the user
+/// * `encoded_password` - the base64-encoded password of the user
+/// * `ids` - the ids of the users to add to the group
+/// * `emails` - the emails of the users to add to the group
+/// * `client` - the client to use to make requests
+///
+/// # Returns
+///
+/// A `Result` containing the group id
+fn get_or_create_group(
+    server_url: &str,
+    email: &str,
+    encoded_password: &str,
+    ids: Vec<i64>,
+    emails: Vec<String>,
+    client: &reqwest::blocking::Client,
+) -> Result<i64, Box<dyn Error>> {
+    // put emails and ids together
+    let mut members = Vec::new();
+    for (email, id) in emails.into_iter().zip(ids.iter()) {
+        members.push(GetGroupItem {
+            email,
+            user_id: *id,
+        });
+    }
+    let members = GetGroupResponse { members };
+
+    // make request to group endpoint
+    let resp = client
+        .get(format!(
+            "{server_url}/api/v1/group?user_email={email}&user_password_hash={encoded_password}",
+        ))
+        .json(&members)
+        .send()?;
+    if resp.status() == StatusCode::NOT_FOUND {
+        // group doesn't exist, so create it
+        Ok(create_group(
+            server_url,
+            email,
+            encoded_password,
+            ids,
+            members,
+            &client,
+        )?)
+    } else if resp.status().is_success() {
+        // group already exists
+        let group_id_response: CreateGroupResponse = resp.json()?;
+        Ok(group_id_response.group_id)
+    } else {
+        return Err(Box::from(format!(
+            "Server responded to group get request with:\nStatus: {}\nResponse: {}",
+            resp.status(),
+            resp.text()?
+        )));
+    }
 }
 
 /// Uploads a file to the server
@@ -337,57 +432,20 @@ pub fn upload(
             // add ourself to the list
             emails.push(email.to_string());
             ids.push(user_id);
-            // make request to get group id
-            let mut members = Vec::new();
-            for (email, id) in emails.into_iter().zip(ids.iter()) {
-                members.push(GetGroupItem {
-                    email,
-                    user_id: *id,
-                });
-            }
-            let members = GetGroupResponse { members };
-            let resp = client
-                .get(format!(
-                    "{server_url}/api/v1/group?user_email={email}&user_password_hash={encoded_password}",
-                ))
-                .json(&members)
-                .send()?;
-            if resp.status() == StatusCode::NOT_FOUND {
-                // group doesn't exist, so create it
-                create_group(server_url, email, encoded_password, ids, members, &client)?
-            } else if resp.status().is_success() {
-                // group already exists
-                let group_id_response: CreateGroupResponse = resp.json()?;
-                group_id_response.group_id
-            } else {
-                return Err(Box::from(format!(
-                    "Server responded to group get request with:\nStatus: {}\nResponse: {}",
-                    resp.status(),
-                    resp.text()?
-                )));
-            }
+
+            // get group id from server
+            get_or_create_group(server_url, email, encoded_password, ids, emails, &client)?
         }
     };
 
     // so now we have the group id
     // get the group key
-    let resp = client
-        .get(format!(
-            "{server_url}/api/v1/group/{group_id}/key?user_email={email}&user_password_hash={encoded_password}",
-        ))
-        .send()?;
-    if !resp.status().is_success() {
-        return Err(Box::from(format!(
-            "Server responded to group key request with:\nStatus: {}\nResponse: {}",
-            resp.status(),
-            resp.text()?
-        )));
-    }
-    let group_key_response: GetGroupKeyResponse = resp.json()?;
-    let group_key = kp.get_group_key(&group_key_response.encrypted_key);
+    let group_key = get_group_key(server_url, email, encoded_password, group_id, kp, &client)?;
+
     // encrypt file
     let bytes = fs::read(&file)?;
     let encrypted_file = group_key.encrypt_file(&bytes);
+
     // make request to upload endpoint
     let file_part = multipart::Part::bytes(postcard::to_allocvec(&encrypted_file)?)
         .file_name(file.file_name().unwrap().to_str().unwrap().to_string())

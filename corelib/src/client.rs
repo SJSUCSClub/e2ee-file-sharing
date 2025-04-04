@@ -235,7 +235,7 @@ impl GroupKey {
     /// # Returns
     ///
     /// A vector of encrypted group keys (as bytes)
-    pub fn make_encrypted_group_keys(public_keys: &[&RsaPublicKey]) -> Vec<Vec<u8>> {
+    pub fn make_encrypted_group_keys(public_keys: &[RsaPublicKey]) -> Vec<Vec<u8>> {
         let group_key = aes_gcm::Aes256Gcm::generate_key(aes_gcm::aead::OsRng);
         let group_key = group_key.to_vec();
 
@@ -323,7 +323,8 @@ mod tests {
         assert_ne!(kp1.pkpriv, kp2.pkpriv);
 
         // encrypt group key for them and recover
-        let encrypted_group_keys = GroupKey::make_encrypted_group_keys(&[&kp1.pkpub, &kp2.pkpub]);
+        let encrypted_group_keys =
+            GroupKey::make_encrypted_group_keys(&[kp1.pkpub.clone(), kp2.pkpub.clone()]);
         let recovered_group_key1 = kp1.get_group_key(&encrypted_group_keys[0]);
         let recovered_group_key2 = kp2.get_group_key(&encrypted_group_keys[1]);
         assert_eq!(recovered_group_key1, recovered_group_key2);
