@@ -773,6 +773,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "corelib",
+ "models",
  "postcard",
  "reqwest",
  "rpassword",
@@ -2686,6 +2687,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "models"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "utoipa",
+]
+
+[[package]]
 name = "muda"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4337,6 +4346,7 @@ dependencies = [
  "base64 0.22.1",
  "corelib",
  "http-body-util",
+ "models",
  "rusqlite",
  "serde",
  "serde_json",

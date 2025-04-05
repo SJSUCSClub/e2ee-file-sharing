@@ -9,8 +9,9 @@ use axum::{
 use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE, Engine as _};
 use corelib::server::{make_salt, salt_password};
 
+use models::*;
 use rusqlite::Connection;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio::sync::{
     mpsc::{self, Sender},
     oneshot,
@@ -196,18 +197,21 @@ pub(crate) async fn connection_task(conn: Connection, mut rx: mpsc::Receiver<Dat
 // ==============================
 // Middleware
 // ==============================
+
 #[derive(utoipa::IntoParams, Deserialize, Debug)]
 #[into_params(style=Form, parameter_in = Query)]
 pub(crate) struct UserAuth {
     /// user email address
     user_email: String,
-    /// Base64 encoded password hash
+    /// url-safe base64 encoded password hash
     user_password_hash: String,
 }
+
 #[derive(Clone, Debug)]
 pub(crate) struct UserAuthExtension {
     user_id: i64,
 }
+
 pub(crate) async fn user_auth(
     State(st): State<HandlerState>,
     Query(params): Query<UserAuth>,
@@ -250,19 +254,6 @@ pub(crate) async fn user_auth(
 // FILES endpoints
 // ==============================
 
-#[derive(utoipa::ToSchema, Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub(crate) struct ListFilesItem {
-    file_name: String,
-    file_id: i64,
-    group_name: String,
-    group_id: i64,
-}
-
-#[derive(utoipa::ToSchema, Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub(crate) struct ListFilesResponse {
-    files: Vec<ListFilesItem>,
-}
-
 // TODO - ideally upload and download
 // would stream data instead of just using
 // multipart/form-data because this would
@@ -272,7 +263,7 @@ pub(crate) struct ListFilesResponse {
     path = "/api/v1/list-files",
     tag = "Files",
     responses(
-        (status=OK, body=ListFilesResponse, description="List of files"),
+        (status=OK, body=FileInfos, description="List of files"),
         (status=BAD_REQUEST, description="Failed to get files"),
         (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding")
     ),
@@ -305,14 +296,14 @@ pub(crate) async fn list_files(
     // return the files, as proper response
     let files = files_vec
         .iter()
-        .map(|(file_name, file_id, group_name, group_id)| ListFilesItem {
+        .map(|(file_name, file_id, group_name, group_id)| FileInfo {
             file_name: file_name.clone(),
             file_id: *file_id,
             group_name: group_name.clone(),
             group_id: *group_id,
         })
         .collect();
-    let response = ListFilesResponse { files };
+    let response = FileInfos { files };
     (StatusCode::OK, Json(response)).into_response()
 }
 
@@ -394,10 +385,7 @@ pub(crate) async fn get_file(
 pub(crate) struct UploadFileQueryParams {
     group_id: i64,
 }
-#[derive(utoipa::ToSchema, Serialize, Deserialize, Debug)]
-pub(crate) struct UploadFileResponse {
-    file_id: i64,
-}
+
 // struct to outline the structure of the form
 // that should be submitted to the endpoint
 #[derive(utoipa::ToSchema)]
@@ -412,7 +400,7 @@ struct FileForm {
     path = "/api/v1/file",
     tag = "Files",
     responses(
-        (status=OK, body=UploadFileResponse, description="File id"),
+        (status=OK, body=FileID, description="File id"),
         (status=BAD_REQUEST, description="Failed to get group or user not in group"),
         (status=INTERNAL_SERVER_ERROR, description="Failed to save file or database error"),
         (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding")
@@ -487,7 +475,7 @@ pub(crate) async fn upload_file(
                     return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to save file")
                         .into_response();
                 } else {
-                    return (StatusCode::OK, Json(UploadFileResponse { file_id })).into_response();
+                    return (StatusCode::OK, Json(FileID { file_id })).into_response();
                 }
             }
             // ignore other fields
@@ -502,7 +490,7 @@ pub(crate) async fn upload_file(
     path = "/api/v1/file/{file_id}/info",
     tag = "Files",
     responses(
-        (status=OK, body=ListFilesItem, description="File info"),
+        (status=OK, body=FileInfo, description="File info"),
         (status=BAD_REQUEST, description="No such file or user not in group"),
         (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding")
     ),
@@ -529,7 +517,7 @@ pub(crate) async fn get_file_info(
     match rx.await.unwrap() {
         Ok(info) => (
             StatusCode::OK,
-            Json(ListFilesItem {
+            Json(FileInfo {
                 file_name: info.0,
                 file_id,
                 group_name: info.1,
@@ -548,17 +536,12 @@ pub(crate) async fn get_file_info(
 // USERS endpoints
 // ==============================
 
-#[derive(utoipa::ToSchema, Serialize, Deserialize, Debug)]
-pub(crate) struct GetUserInfoResponse {
-    user_id: i64,
-}
-
 #[utoipa::path(
     get,
     path = "/api/v1/user/info",
     tag = "Users",
     responses(
-        (status=OK, body=GetUserInfoResponse, description="User info"),
+        (status=OK, body=UserID, description="User info"),
         (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding")
     ),
     params(
@@ -568,10 +551,7 @@ pub(crate) struct GetUserInfoResponse {
 pub(crate) async fn get_user_info(
     Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
 ) -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        Json(GetUserInfoResponse { user_id: user_id }),
-    )
+    (StatusCode::OK, Json(UserID { user_id: user_id }))
 }
 
 #[derive(utoipa::IntoParams, Deserialize, Debug)]
@@ -579,17 +559,13 @@ pub(crate) async fn get_user_info(
 pub(crate) struct GetUserKeyQueryParams {
     target_user_id: i64,
 }
-#[derive(utoipa::ToSchema, Serialize, Deserialize, Debug)]
-pub(crate) struct GetUserKeyResponse {
-    key: Vec<u8>,
-}
 
 #[utoipa::path(
     get,
     path = "/api/v1/user/key",
     tag = "Users",
     responses(
-        (status=OK, body=GetUserKeyResponse, description="User key"),
+        (status=OK, body=Key, description="Standard base64 encoded user public key"),
         (status=BAD_REQUEST, description="Failed to get user key"),
         (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding")
     ),
@@ -619,19 +595,8 @@ pub(crate) async fn get_user_key(
             return (StatusCode::BAD_REQUEST, "Failed to get user key").into_response();
         }
     };
-    (StatusCode::OK, Json(GetUserKeyResponse { key })).into_response()
-}
-
-#[derive(utoipa::ToSchema, Deserialize)]
-pub(crate) struct RegisterUser {
-    user_email: String,
-    user_password_hash: String,
-    key: String,
-}
-
-#[derive(utoipa::ToSchema, Serialize, Deserialize, Debug)]
-pub(crate) struct RegisterUserResponse {
-    id: i64,
+    let key = BASE64_STANDARD.encode(key);
+    (StatusCode::OK, Json(Key { key })).into_response()
 }
 
 #[utoipa::path(
@@ -639,15 +604,15 @@ pub(crate) struct RegisterUserResponse {
     path = "/api/v1/user",
     tag = "Users",
     responses(
-        (status=OK, body=RegisterUserResponse, description="User id"),
+        (status=OK, body=UserID, description="User ID"),
         (status=BAD_REQUEST, description="Failed to register user"),
         (status=CONFLICT, description="Email is already taken"),
     ),
-    request_body=RegisterUser
+    request_body=UserWithKeyAndPassword
 )]
 pub(crate) async fn register_user(
     State(st): State<HandlerState>,
-    Json(params): Json<RegisterUser>,
+    Json(params): Json<UserWithKeyAndPassword>,
 ) -> Response {
     // first, convert password and key into bytes
     let password_bytes = BASE64_STANDARD.decode(&params.user_password_hash).unwrap();
@@ -676,30 +641,19 @@ pub(crate) async fn register_user(
             return (StatusCode::CONFLICT, "Email is already taken").into_response();
         }
     };
-    (StatusCode::OK, Json(RegisterUserResponse { id })).into_response()
+    (StatusCode::OK, Json(UserID { user_id: id })).into_response()
 }
 
 // ==============================
 // GROUPS endpoints
 // ==============================
 
-#[derive(utoipa::ToSchema, Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub(crate) struct GetGroupItem {
-    email: String,
-    user_id: i64,
-}
-
-#[derive(utoipa::ToSchema, Serialize, Deserialize, Debug)]
-pub(crate) struct GetGroupResponse {
-    members: Vec<GetGroupItem>,
-}
-
 #[utoipa::path(
     get,
     path = "/api/v1/group/{group_id}/members",
     tag = "Groups",
     responses(
-        (status=OK, body=GetGroupResponse, description="Group members"),
+        (status=OK, body=GroupMembers, description="Group members"),
         (status=BAD_REQUEST, description="Failed to get group members"),
         (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding"),
     ),
@@ -733,26 +687,25 @@ pub(crate) async fn get_group_by_id(
     // collect into proper format
     let mut members = Vec::new();
     for (email, user_id) in group_members {
-        members.push(GetGroupItem { email, user_id });
+        members.push(User {
+            user_email: email,
+            user_id,
+        });
     }
 
     // validate that the user is in the group before returning
     if !members.iter().any(|member| member.user_id == user_id) {
         return (StatusCode::UNAUTHORIZED, "User not present in group").into_response();
     }
-    (StatusCode::OK, Json(GetGroupResponse { members })).into_response()
+    (StatusCode::OK, Json(GroupMembers { members })).into_response()
 }
 
-#[derive(utoipa::ToSchema, Serialize, Deserialize, Debug)]
-pub(crate) struct GetGroupKeyResponse {
-    encrypted_key: Vec<u8>,
-}
 #[utoipa::path(
     get,
     path = "/api/v1/group/{group_id}/key",
     tag = "Groups",
     responses(
-        (status=OK, body=GetGroupKeyResponse, description="Group key"),
+        (status=OK, body=Key, description="Standard base-64 encoded AES group key"),
         (status=BAD_REQUEST, description="Failed to get group key"),
         (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding"),
     ),
@@ -782,13 +735,9 @@ pub(crate) async fn get_group_key_by_id(
             return (StatusCode::BAD_REQUEST, "Failed to get group key").into_response();
         }
     };
+    let key = BASE64_STANDARD.encode(encrypted_key);
 
-    (StatusCode::OK, Json(GetGroupKeyResponse { encrypted_key })).into_response()
-}
-
-#[derive(utoipa::ToSchema, Serialize, Deserialize, Debug)]
-pub(crate) struct GetGroupByMembersResponse {
-    group_id: i64,
+    (StatusCode::OK, Json(Key { key })).into_response()
 }
 
 #[utoipa::path(
@@ -796,19 +745,19 @@ pub(crate) struct GetGroupByMembersResponse {
     path = "/api/v1/group",
     tag = "Groups",
     responses(
-        (status=OK, body=GetGroupByMembersResponse, description="Group id"),
+        (status=OK, body=GroupMembers, description="Group id"),
         (status=BAD_REQUEST, description="Failed to get group id"),
         (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding"),
     ),
     params(
         UserAuth,
     ),
-    request_body = GetGroupResponse
+    request_body = GroupID
 )]
 pub(crate) async fn get_group_by_members(
     State(st): State<HandlerState>,
     Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
-    Json(body): Json<GetGroupResponse>,
+    Json(body): Json<GroupMembers>,
 ) -> impl IntoResponse {
     // validate that all users exist
     let (tx, rx) = oneshot::channel();
@@ -817,7 +766,7 @@ pub(crate) async fn get_group_by_members(
             users: body
                 .members
                 .iter()
-                .map(|m| (m.user_id, m.email.clone()))
+                .map(|m| (m.user_id, m.user_email.clone()))
                 .collect(),
             responder: tx,
         })
@@ -857,26 +806,9 @@ pub(crate) async fn get_group_by_members(
 
     // return either the group id or a 404
     match group_id {
-        Some(group_id) => {
-            (StatusCode::OK, Json(GetGroupByMembersResponse { group_id })).into_response()
-        }
+        Some(group_id) => (StatusCode::OK, Json(GroupID { group_id })).into_response(),
         None => (StatusCode::NOT_FOUND, "No such group exists").into_response(),
     }
-}
-
-#[derive(utoipa::ToSchema, Deserialize, Serialize, Debug)]
-pub(crate) struct CreateGroupItem {
-    user_id: i64,
-    email: String,
-    encrypted_key: Vec<u8>,
-}
-#[derive(utoipa::ToSchema, Deserialize, Serialize, Debug)]
-pub(crate) struct CreateGroupBody {
-    members: Vec<CreateGroupItem>,
-}
-#[derive(utoipa::ToSchema, Serialize, Deserialize, Debug)]
-pub(crate) struct CreateGroupResponse {
-    group_id: i64,
 }
 
 #[utoipa::path(
@@ -884,7 +816,7 @@ pub(crate) struct CreateGroupResponse {
     path = "/api/v1/group",
     tag = "Groups",
     responses(
-        (status=OK, body=CreateGroupResponse, description="Group id"),
+        (status=OK, body=GroupID, description="Group id"),
         (status=BAD_REQUEST, description="Failed to create group"),
         (status=CONFLICT, description="Group already exists"),
         (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding"),
@@ -892,12 +824,12 @@ pub(crate) struct CreateGroupResponse {
     params(
         UserAuth,
     ),
-    request_body = CreateGroupBody
+    request_body = GroupMembersWithKey
 )]
 pub(crate) async fn create_group(
     State(st): State<HandlerState>,
     Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
-    Json(body): Json<CreateGroupBody>,
+    Json(body): Json<GroupMembersWithKey>,
 ) -> impl IntoResponse {
     // validate that all users exist
     let (tx, rx) = oneshot::channel();
@@ -906,7 +838,7 @@ pub(crate) async fn create_group(
             users: body
                 .members
                 .iter()
-                .map(|m| (m.user_id, m.email.clone()))
+                .map(|m| (m.user_id, m.user_email.clone()))
                 .collect(),
             responder: tx,
         })
@@ -945,7 +877,7 @@ pub(crate) async fn create_group(
     };
     if let Some(group_id) = group_id {
         // then return 409 and the group id
-        return (StatusCode::CONFLICT, Json(CreateGroupResponse { group_id })).into_response();
+        return (StatusCode::CONFLICT, Json(GroupID { group_id })).into_response();
     }
     // so now actually create group
     let (tx, rx) = oneshot::channel();
@@ -954,7 +886,7 @@ pub(crate) async fn create_group(
             members: body
                 .members
                 .into_iter()
-                .map(|m| (m.user_id, m.encrypted_key))
+                .map(|m| (m.user_id, BASE64_STANDARD.decode(m.key).unwrap()))
                 .collect(),
             responder: tx,
         })
@@ -967,17 +899,7 @@ pub(crate) async fn create_group(
             return (StatusCode::BAD_REQUEST, "Failed to create group").into_response();
         }
     };
-    (StatusCode::OK, Json(CreateGroupResponse { group_id })).into_response()
-}
-
-#[derive(utoipa::ToSchema, Serialize, Debug)]
-pub(crate) struct ListGroupsItem {
-    group_id: i64,
-    name: String,
-}
-#[derive(utoipa::ToSchema, Serialize, Debug)]
-pub(crate) struct ListGroupsResponse {
-    groups: Vec<ListGroupsItem>,
+    (StatusCode::OK, Json(GroupID { group_id })).into_response()
 }
 
 #[utoipa::path(
@@ -985,7 +907,7 @@ pub(crate) struct ListGroupsResponse {
     path = "/api/v1/list-groups",
     tag = "Groups",
     responses(
-        (status=OK, body=ListGroupsResponse, description="Groups"),
+        (status=OK, body=Groups, description="Groups"),
         (status=BAD_REQUEST, description="Failed to list groups"),
         (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding"),
     ),
@@ -1016,13 +938,13 @@ pub(crate) async fn list_groups(
     };
     let groups = groups
         .into_iter()
-        .map(|g| ListGroupsItem {
+        .map(|g| Group {
             group_id: g.0,
             name: g.1,
         })
         .collect();
     // send response
-    (StatusCode::OK, Json(ListGroupsResponse { groups })).into_response()
+    (StatusCode::OK, Json(Groups { groups })).into_response()
 }
 
 // ==============================
@@ -1234,18 +1156,18 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let body: ListFilesResponse = serde_json::from_slice(&body).unwrap();
+        let body: FileInfos = serde_json::from_slice(&body).unwrap();
 
         assert_eq!(
             body.files,
             vec![
-                ListFilesItem {
+                FileInfo {
                     file_id: 1,
                     file_name: "test_file.txt".to_string(),
                     group_name: "group_name".to_string(),
                     group_id: 1
                 },
-                ListFilesItem {
+                FileInfo {
                     file_id: 2,
                     file_name: "test_file2.txt".to_string(),
                     group_name: "group_name".to_string(),
@@ -1408,7 +1330,7 @@ mod tests {
 
         // try properly authenticated request
         // make request body
-        let data = "--MYBOUNDARY\r\nContent-Disposition: form-data; name=\"test\"; filename=\"test.txt\"\r\nContent-Type: text/plain\r\n\r\nHELLO WORLD\r\n--MYBOUNDARY\r\n";
+        let data = "--MYBOUNDARY\r\nContent-Disposition: form-data; name=\"file\"; filename=\"test.txt\"\r\nContent-Type: text/plain\r\n\r\nHELLO WORLD\r\n--MYBOUNDARY\r\n";
         let request = Request::builder()
             .uri(format!(
                 "/?user_email=test@test.com&user_password_hash={encoded_password_hash}&group_id=1"
@@ -1428,7 +1350,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let body: UploadFileResponse = serde_json::from_slice(&body).unwrap();
+        let body: FileID = serde_json::from_slice(&body).unwrap();
         assert_eq!(body.file_id, 1);
         let contents = tokio::fs::read_to_string(to_path(upload_directory, 1))
             .await
@@ -1502,7 +1424,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let body: ListFilesItem = serde_json::from_slice(&body).unwrap();
+        let body: FileInfo = serde_json::from_slice(&body).unwrap();
         assert_eq!(body.file_name, "test_file.txt");
 
         // and try request to file id that user is not a part of
@@ -1567,7 +1489,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let body: GetUserInfoResponse = serde_json::from_slice(&body).unwrap();
+        let body: UserID = serde_json::from_slice(&body).unwrap();
         assert_eq!(body.user_id, 1);
     }
 
@@ -1611,8 +1533,9 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let body: GetUserKeyResponse = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body.key, vec![0xe0]);
+        let body: Key = serde_json::from_slice(&body).unwrap();
+        let key = BASE64_STANDARD.decode(body.key).unwrap();
+        assert_eq!(key, vec![0xe0]);
     }
 
     // ==============================
@@ -1666,22 +1589,22 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let body: GetGroupResponse = serde_json::from_slice(&body).unwrap();
+        let body: GroupMembers = serde_json::from_slice(&body).unwrap();
         assert_eq!(body.members.len(), 3);
         assert_eq!(
             body.members,
             vec![
-                GetGroupItem {
+                User {
                     user_id: 1,
-                    email: "test@test.com".to_string()
+                    user_email: "test@test.com".to_string()
                 },
-                GetGroupItem {
+                User {
                     user_id: 2,
-                    email: "test2@test.com".to_string()
+                    user_email: "test2@test.com".to_string()
                 },
-                GetGroupItem {
+                User {
                     user_id: 3,
-                    email: "test3@test.com".to_string()
+                    user_email: "test3@test.com".to_string()
                 }
             ]
         );
@@ -1721,7 +1644,7 @@ mod tests {
         conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
             .unwrap();
         let key = vec![22u8, 33u8, 11u8];
-        conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 1, 'group_name', X'00'), (2, 2, 'group_name', X'00'), (2, 3, 'group_name', X'00'), (3, 1, 'group_name', ?);", [&key]).unwrap();
+        conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 1, 'group_name', X'ef'), (2, 2, 'group_name', X'00'), (2, 3, 'group_name', X'00'), (3, 1, 'group_name', ?);", [&key]).unwrap();
         // initialize state
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let state = HandlerState {
@@ -1754,8 +1677,9 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let body: GetGroupKeyResponse = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body.encrypted_key, vec![0 as u8]);
+        let body: Key = serde_json::from_slice(&body).unwrap();
+        let retrieved_key = BASE64_STANDARD.decode(body.key).unwrap();
+        assert_eq!(retrieved_key, vec![0xef as u8]);
 
         // try request to group that user is not part of
         let request = Request::builder()
@@ -1791,8 +1715,9 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let body: GetGroupKeyResponse = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body.encrypted_key, key);
+        let body: Key = serde_json::from_slice(&body).unwrap();
+        let retrieved_key = BASE64_STANDARD.decode(body.key).unwrap();
+        assert_eq!(retrieved_key, key);
     }
 
     #[tokio::test]
@@ -1825,7 +1750,7 @@ mod tests {
             .with_state(state);
 
         // try properly authenticated request
-        let body = "{\"members\":[{\"user_id\":1,\"email\":\"test@test.com\"},{\"user_id\":2,\"email\":\"test2@test.com\"},{\"user_id\":3,\"email\":\"test3@test.com\"}]}";
+        let body = "{\"members\":[{\"user_id\":1,\"user_email\":\"test@test.com\"},{\"user_id\":2,\"user_email\":\"test2@test.com\"},{\"user_id\":3,\"user_email\":\"test3@test.com\"}]}";
         let request = Request::builder()
             .uri(format!(
                 "/?user_email=test@test.com&user_password_hash={encoded_password_hash}"
@@ -1842,11 +1767,11 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let body: GetGroupByMembersResponse = serde_json::from_slice(&body).unwrap();
+        let body: GroupID = serde_json::from_slice(&body).unwrap();
         assert_eq!(body.group_id, 1);
 
         // try one where the group doesn't exist
-        let body = "{\"members\":[{\"user_id\":1,\"email\":\"test@test.com\"},{\"user_id\":2,\"email\":\"test2@test.com\"}]}";
+        let body = "{\"members\":[{\"user_id\":1,\"user_email\":\"test@test.com\"},{\"user_id\":2,\"user_email\":\"test2@test.com\"}]}";
         let request = Request::builder()
             .uri(format!(
                 "/?user_email=test@test.com&user_password_hash={encoded_password_hash}"
@@ -1866,7 +1791,7 @@ mod tests {
         assert_eq!(&body[..], b"No such group exists");
 
         // try one where not all users exist
-        let body = "{\"members\":[{\"user_id\":1,\"email\":\"test@test.com\"},{\"user_id\":2,\"email\":\"test2@test.com\"}, {\"user_id\":3,\"email\":\"test3@test.com\"}, {\"user_id\":4,\"email\":\"test4@test.com\"}]}";
+        let body = "{\"members\":[{\"user_id\":1,\"user_email\":\"test@test.com\"},{\"user_id\":2,\"user_email\":\"test2@test.com\"}, {\"user_id\":3,\"user_email\":\"test3@test.com\"}, {\"user_id\":4,\"user_email\":\"test4@test.com\"}]}";
         let request = Request::builder()
             .uri(format!(
                 "/?user_email=test@test.com&user_password_hash={encoded_password_hash}"
@@ -1886,7 +1811,7 @@ mod tests {
         assert_eq!(&body[..], b"Not all users exist");
 
         // try one group exists but user not in it
-        let body = "{\"members\":[{\"user_id\":2,\"email\":\"test2@test.com\"}, {\"user_id\":3,\"email\":\"test3@test.com\"}]}";
+        let body = "{\"members\":[{\"user_id\":2,\"user_email\":\"test2@test.com\"}, {\"user_id\":3,\"user_email\":\"test3@test.com\"}]}";
         let request = Request::builder()
             .uri(format!(
                 "/?user_email=test@test.com&user_password_hash={encoded_password_hash}"
@@ -1940,17 +1865,17 @@ mod tests {
         // try properly authenticated request
         let key = [0u8, 1u8];
         let key2 = [2u8, 3u8];
-        let request_body = CreateGroupBody {
+        let request_body = GroupMembersWithKey {
             members: vec![
-                CreateGroupItem {
+                UserWithKey {
                     user_id: 1,
-                    email: "test@test.com".to_string(),
-                    encrypted_key: key.to_vec(),
+                    user_email: "test@test.com".to_string(),
+                    key: BASE64_STANDARD.encode(key.to_vec()),
                 },
-                CreateGroupItem {
+                UserWithKey {
                     user_id: 2,
-                    email: "test2@test.com".to_string(),
-                    encrypted_key: key2.to_vec(),
+                    user_email: "test2@test.com".to_string(),
+                    key: BASE64_STANDARD.encode(key2.to_vec()),
                 },
             ],
         };
@@ -1971,7 +1896,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let body: CreateGroupResponse = serde_json::from_slice(&body).unwrap();
+        let body: GroupID = serde_json::from_slice(&body).unwrap();
         assert_eq!(body.group_id, 1);
         let conn = Connection::open("/tmp/test_create_group.db").unwrap();
         let recovered_key = conn
@@ -1992,17 +1917,17 @@ mod tests {
         assert_eq!(recovered_key2, key2);
 
         // try when not all users exist
-        let request_body = CreateGroupBody {
+        let request_body = GroupMembersWithKey {
             members: vec![
-                CreateGroupItem {
+                UserWithKey {
                     user_id: 1,
-                    email: "test@test.com".to_string(),
-                    encrypted_key: key.to_vec(),
+                    user_email: "test@test.com".to_string(),
+                    key: BASE64_STANDARD.encode(key.to_vec()),
                 },
-                CreateGroupItem {
+                UserWithKey {
                     user_id: 4,
-                    email: "test2@test.com".to_string(),
-                    encrypted_key: key2.to_vec(),
+                    user_email: "test2@test.com".to_string(),
+                    key: BASE64_STANDARD.encode(key2.to_vec()),
                 },
             ],
         };
@@ -2026,11 +1951,11 @@ mod tests {
         assert_eq!(&body[..], b"Not all users exist");
 
         // try when user not present
-        let request_body = CreateGroupBody {
-            members: vec![CreateGroupItem {
+        let request_body = GroupMembersWithKey {
+            members: vec![UserWithKey {
                 user_id: 2,
-                email: "test2@test.com".to_string(),
-                encrypted_key: key2.to_vec(),
+                user_email: "test2@test.com".to_string(),
+                key: BASE64_STANDARD.encode(key2.to_vec()),
             }],
         };
         let request_body = serde_json::to_string(&request_body).unwrap();
@@ -2053,17 +1978,17 @@ mod tests {
         assert_eq!(&body[..], b"User not present in group");
 
         // try when group already exists
-        let request_body = CreateGroupBody {
+        let request_body = GroupMembersWithKey {
             members: vec![
-                CreateGroupItem {
+                UserWithKey {
                     user_id: 1,
-                    email: "test@test.com".to_string(),
-                    encrypted_key: key.to_vec(),
+                    user_email: "test@test.com".to_string(),
+                    key: BASE64_STANDARD.encode(key.to_vec()),
                 },
-                CreateGroupItem {
+                UserWithKey {
                     user_id: 2,
-                    email: "test2@test.com".to_string(),
-                    encrypted_key: key2.to_vec(),
+                    user_email: "test2@test.com".to_string(),
+                    key: BASE64_STANDARD.encode(key2.to_vec()),
                 },
             ],
         };
@@ -2084,7 +2009,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let body: CreateGroupResponse = serde_json::from_slice(&body).unwrap();
+        let body: GroupID = serde_json::from_slice(&body).unwrap();
         assert_eq!(body.group_id, 1);
     }
 
@@ -2130,7 +2055,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let response_user: RegisterUserResponse = from_slice(&body).unwrap();
-        assert!(response_user.id > 0);
+        let response_user: UserID = from_slice(&body).unwrap();
+        assert!(response_user.user_id > 0);
     }
 }

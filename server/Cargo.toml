@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 corelib = { version = "0.1.0", path = "../corelib" }
+models = { version = "0.1.0", path = "../models" }
 axum = { version = "0.8.1", features = ["multipart", "macros"] }
 tokio = { version = "1.43.0", features = ["rt", "macros", "fs", "rt-multi-thread"] }
 tokio-util = { version = "0.7.14", features = ["io"] }
