@@ -258,6 +258,7 @@ pub(crate) async fn user_auth(
 // would stream data instead of just using
 // multipart/form-data because this would
 // allow easy handling of large files.
+/// List all files that the user has access to
 #[utoipa::path(
     get,
     path = "/api/v1/list-files",
@@ -313,6 +314,7 @@ pub(crate) struct GetFileQueryParams {
     file_id: i64,
 }
 
+/// Download the requested file
 #[utoipa::path(
     get,
     path = "/api/v1/file",
@@ -395,6 +397,7 @@ struct FileForm {
     file: String,
 }
 
+/// Upload a file
 #[utoipa::path(
     post,
     path = "/api/v1/file",
@@ -485,6 +488,7 @@ pub(crate) async fn upload_file(
     (StatusCode::BAD_REQUEST, "No file body provided").into_response()
 }
 
+/// Get file info (file name, file id, group name, group id)
 #[utoipa::path(
     get,
     path = "/api/v1/file/{file_id}/info",
@@ -536,6 +540,7 @@ pub(crate) async fn get_file_info(
 // USERS endpoints
 // ==============================
 
+/// Get user info (user id)
 #[utoipa::path(
     get,
     path = "/api/v1/user/info",
@@ -560,6 +565,7 @@ pub(crate) struct GetUserKeyQueryParams {
     target_user_id: i64,
 }
 
+/// Get a user's public key
 #[utoipa::path(
     get,
     path = "/api/v1/user/key",
@@ -599,6 +605,7 @@ pub(crate) async fn get_user_key(
     (StatusCode::OK, Json(Key { key })).into_response()
 }
 
+/// Register a new user
 #[utoipa::path(
     post,
     path = "/api/v1/user",
@@ -648,6 +655,7 @@ pub(crate) async fn register_user(
 // GROUPS endpoints
 // ==============================
 
+/// Get group members
 #[utoipa::path(
     get,
     path = "/api/v1/group/{group_id}/members",
@@ -700,6 +708,7 @@ pub(crate) async fn get_group_by_id(
     (StatusCode::OK, Json(GroupMembers { members })).into_response()
 }
 
+/// Get the group key encrypted for the calling user
 #[utoipa::path(
     get,
     path = "/api/v1/group/{group_id}/key",
@@ -740,6 +749,8 @@ pub(crate) async fn get_group_key_by_id(
     (StatusCode::OK, Json(Key { key })).into_response()
 }
 
+/// Get the group ID for the group
+/// containing the given members
 #[utoipa::path(
     get,
     path = "/api/v1/group",
@@ -811,6 +822,7 @@ pub(crate) async fn get_group_by_members(
     }
 }
 
+/// Create a new group
 #[utoipa::path(
     post,
     path = "/api/v1/group",
@@ -902,6 +914,7 @@ pub(crate) async fn create_group(
     (StatusCode::OK, Json(GroupID { group_id })).into_response()
 }
 
+/// List all groups that the user has access to
 #[utoipa::path(
     get,
     path = "/api/v1/list-groups",

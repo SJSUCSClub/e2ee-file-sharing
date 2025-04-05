@@ -7,7 +7,16 @@ use api::{HandlerState, connection_task};
 use axum::middleware;
 
 use rusqlite::Connection;
+use utoipa::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
+
+#[derive(OpenApi)]
+#[openapi(info(
+    title = "E2EE File Sharing API",
+    description = "API for E2EE file sharing",
+    version = "0.1.0",
+))]
+struct ApiDoc;
 
 #[tokio::main]
 async fn main() {
@@ -30,7 +39,7 @@ async fn main() {
     // make app
     // but in two parts, one for endpoints requiring auth
     // and one for those that don't
-    let (auth_app, auth_openapi) = OpenApiRouter::new()
+    let (auth_app, auth_openapi) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(api::list_files))
         .routes(routes!(api::get_file))
         .routes(routes!(api::upload_file))
