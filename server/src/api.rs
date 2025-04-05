@@ -3,7 +3,7 @@ use axum::{
     body::Body,
     extract::{Multipart, Path, Query, Request, State},
     http::{StatusCode, header},
-    middleware::{self, Next},
+    middleware::Next,
     response::{IntoResponse, Response},
 };
 use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE, Engine as _};
@@ -28,10 +28,6 @@ use crate::db::{
 // ==============================
 fn to_path(upload_directory: &str, file_id: i64) -> String {
     format!("{upload_directory}/{file_id}")
-}
-
-pub(crate) async fn hello() -> &'static str {
-    "This is the ACM E2E file sharing server instance."
 }
 
 // ==============================
@@ -200,9 +196,12 @@ pub(crate) async fn connection_task(conn: Connection, mut rx: mpsc::Receiver<Dat
 // ==============================
 // Middleware
 // ==============================
-#[derive(Deserialize, Debug)]
+#[derive(utoipa::IntoParams, Deserialize, Debug)]
+#[into_params(style=Form, parameter_in = Query)]
 pub(crate) struct UserAuth {
+    /// user email address
     user_email: String,
+    /// Base64 encoded password hash
     user_password_hash: String,
 }
 #[derive(Clone, Debug)]
@@ -216,9 +215,13 @@ pub(crate) async fn user_auth(
     next: Next,
 ) -> Response {
     // send request
-    let decoded_password = BASE64_URL_SAFE
-        .decode(params.user_password_hash)
-        .expect("Failed to decode user password hash");
+    let decoded_password = match BASE64_URL_SAFE.decode(params.user_password_hash) {
+        Ok(decoded) => decoded,
+        Err(e) => {
+            println!("Failed to decode password with {e:?}");
+            return (StatusCode::UNAUTHORIZED, "Invalid base64 encoding").into_response();
+        }
+    };
     let (tx, rx) = oneshot::channel();
     st.tx
         .send(DatabaseCommand::GetUserId {
@@ -242,20 +245,12 @@ pub(crate) async fn user_auth(
         .insert(UserAuthExtension { user_id });
     next.run(request).await
 }
-// helper function that way we don't have to write .layer
-// on every authenticated endpoint
-pub(crate) fn authenticated(
-    state: &HandlerState,
-    a: axum::routing::MethodRouter<HandlerState>,
-) -> axum::routing::MethodRouter<HandlerState> {
-    a.layer(middleware::from_fn_with_state(state.clone(), user_auth))
-}
 
 // ==============================
 // FILES endpoints
 // ==============================
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(utoipa::ToSchema, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub(crate) struct ListFilesItem {
     file_name: String,
     file_id: i64,
@@ -263,7 +258,7 @@ pub(crate) struct ListFilesItem {
     group_id: i64,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(utoipa::ToSchema, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub(crate) struct ListFilesResponse {
     files: Vec<ListFilesItem>,
 }
@@ -272,7 +267,19 @@ pub(crate) struct ListFilesResponse {
 // would stream data instead of just using
 // multipart/form-data because this would
 // allow easy handling of large files.
-// curl http://127.0.0.0:8091/api/v1/list-files?user_email=email@test.org&user_password_hash=0033FF -X GET
+#[utoipa::path(
+    get,
+    path = "/api/v1/list-files",
+    tag = "Files",
+    responses(
+        (status=OK, body=ListFilesResponse, description="List of files"),
+        (status=BAD_REQUEST, description="Failed to get files"),
+        (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding")
+    ),
+    params(
+        UserAuth
+    ),
+)]
 pub(crate) async fn list_files(
     State(st): State<HandlerState>,
     Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
@@ -309,13 +316,26 @@ pub(crate) async fn list_files(
     (StatusCode::OK, Json(response)).into_response()
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(utoipa::IntoParams, Deserialize, Debug)]
+#[into_params(style=Form, parameter_in = Query)]
 pub(crate) struct GetFileQueryParams {
     file_id: i64,
 }
 
-// example curl command
-// curl http://127.0.0.0:8091/api/v1/file?file_id=4&user_email=user@test.org&user_password_hash=02FA3B -X GET
+#[utoipa::path(
+    get,
+    path = "/api/v1/file",
+    tag = "Files",
+    responses(
+        (status=OK, body=String, content_type="application/octet-stream",  description="File contents"),
+        (status=BAD_REQUEST, description="Nonexistent file or permission denied"),
+        (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding")
+    ),
+    params(
+        UserAuth,
+        GetFileQueryParams
+    ),
+)]
 pub(crate) async fn get_file(
     Query(params): Query<GetFileQueryParams>,
     State(st): State<HandlerState>,
@@ -369,17 +389,40 @@ pub(crate) async fn get_file(
     (StatusCode::OK, headers, body).into_response()
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(utoipa::IntoParams, Deserialize, Debug)]
+#[into_params(style=Form, parameter_in = Query)]
 pub(crate) struct UploadFileQueryParams {
     group_id: i64,
 }
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(utoipa::ToSchema, Serialize, Deserialize, Debug)]
 pub(crate) struct UploadFileResponse {
     file_id: i64,
 }
+// struct to outline the structure of the form
+// that should be submitted to the endpoint
+#[derive(utoipa::ToSchema)]
+#[allow(unused)]
+struct FileForm {
+    #[schema(format=Binary, content_media_type="application/octet-stream")]
+    file: String,
+}
 
-// example curl command
-// curl http://127.0.0.0:8091/api/v1/file?group_id=1&user_email=email@test.org&user_password_hash=0033FF -X POST -H "Content-Type: multipart/form-data" -F fi=@file.txt
+#[utoipa::path(
+    post,
+    path = "/api/v1/file",
+    tag = "Files",
+    responses(
+        (status=OK, body=UploadFileResponse, description="File id"),
+        (status=BAD_REQUEST, description="Failed to get group or user not in group"),
+        (status=INTERNAL_SERVER_ERROR, description="Failed to save file or database error"),
+        (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding")
+    ),
+    params(
+        UserAuth,
+        UploadFileQueryParams
+    ),
+    request_body(content_type = "multipart/form-data", content = FileForm)
+)]
 pub(crate) async fn upload_file(
     Query(params): Query<UploadFileQueryParams>,
     State(st): State<HandlerState>,
@@ -407,44 +450,67 @@ pub(crate) async fn upload_file(
     }
 
     while let Some(field) = multipart.next_field().await.unwrap() {
-        let file_name = field.file_name().unwrap().to_string();
-        let data = field.bytes().await.unwrap();
+        let field_name = field.name();
+        match field_name {
+            Some("file") => {
+                let file_name = field.file_name().unwrap().to_string();
+                let data = field.bytes().await.unwrap();
 
-        // insert into DB
-        // first, initialize channel to connection thread
-        let (tx, rx) = oneshot::channel();
-        st.tx
-            .send(DatabaseCommand::InsertFile {
-                group_id: params.group_id,
-                filename: file_name,
-                responder: tx,
-            })
-            .await
-            .unwrap();
-        // then match result
-        let file_id = match rx.await.unwrap() {
-            Ok(file_id) => file_id,
-            Err(e) => {
-                println!("Failed to insert file with {e:?}");
-                return (StatusCode::BAD_REQUEST, "Failed to insert file").into_response();
+                // insert into DB
+                // first, initialize channel to connection thread
+                let (tx, rx) = oneshot::channel();
+                st.tx
+                    .send(DatabaseCommand::InsertFile {
+                        group_id: params.group_id,
+                        filename: file_name,
+                        responder: tx,
+                    })
+                    .await
+                    .unwrap();
+                // then match result
+                let file_id = match rx.await.unwrap() {
+                    Ok(file_id) => file_id,
+                    Err(e) => {
+                        println!("Failed to insert file with {e:?}");
+                        return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to insert file")
+                            .into_response();
+                    }
+                };
+
+                // write that to a file
+                // since files are uniquely identified by their file id, then we
+                // can simply save as the file id
+                // and later fetch files by their file_id
+                let path = to_path(&st.upload_directory, file_id);
+                if let Err(e) = tokio::fs::write(path, data).await {
+                    println!("Failed to save file with {e:?}");
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to save file")
+                        .into_response();
+                } else {
+                    return (StatusCode::OK, Json(UploadFileResponse { file_id })).into_response();
+                }
             }
-        };
-
-        // write that to a file
-        // since files are uniquely identified by their file id, then we
-        // can simply save as the file id
-        // and later fetch files by their file_id
-        let path = to_path(&st.upload_directory, file_id);
-        if let Err(e) = tokio::fs::write(path, data).await {
-            println!("Failed to save file with {e:?}");
-            return (StatusCode::BAD_REQUEST, "Failed to save file").into_response();
-        } else {
-            return (StatusCode::OK, Json(UploadFileResponse { file_id })).into_response();
+            // ignore other fields
+            _ => (),
         }
     }
     (StatusCode::BAD_REQUEST, "No file body provided").into_response()
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/file/{file_id}/info",
+    tag = "Files",
+    responses(
+        (status=OK, body=ListFilesItem, description="File info"),
+        (status=BAD_REQUEST, description="No such file or user not in group"),
+        (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding")
+    ),
+    params(
+        ("file_id" = i64, Path, description="File id"),
+        UserAuth,
+    ),
+)]
 pub(crate) async fn get_file_info(
     Path(file_id): Path<i64>,
     Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
@@ -482,11 +548,23 @@ pub(crate) async fn get_file_info(
 // USERS endpoints
 // ==============================
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(utoipa::ToSchema, Serialize, Deserialize, Debug)]
 pub(crate) struct GetUserInfoResponse {
     user_id: i64,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/user/info",
+    tag = "Users",
+    responses(
+        (status=OK, body=GetUserInfoResponse, description="User info"),
+        (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding")
+    ),
+    params(
+        UserAuth
+    ),
+)]
 pub(crate) async fn get_user_info(
     Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
 ) -> impl IntoResponse {
@@ -496,15 +574,30 @@ pub(crate) async fn get_user_info(
     )
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(utoipa::IntoParams, Deserialize, Debug)]
+#[into_params(style=Form, parameter_in = Query)]
 pub(crate) struct GetUserKeyQueryParams {
     target_user_id: i64,
 }
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(utoipa::ToSchema, Serialize, Deserialize, Debug)]
 pub(crate) struct GetUserKeyResponse {
     key: Vec<u8>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/user/key",
+    tag = "Users",
+    responses(
+        (status=OK, body=GetUserKeyResponse, description="User key"),
+        (status=BAD_REQUEST, description="Failed to get user key"),
+        (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding")
+    ),
+    params(
+        UserAuth,
+        GetUserKeyQueryParams
+    ),
+)]
 pub(crate) async fn get_user_key(
     Query(params): Query<GetUserKeyQueryParams>,
     Extension(_): Extension<UserAuthExtension>,
@@ -529,18 +622,29 @@ pub(crate) async fn get_user_key(
     (StatusCode::OK, Json(GetUserKeyResponse { key })).into_response()
 }
 
-#[derive(Deserialize)]
+#[derive(utoipa::ToSchema, Deserialize)]
 pub(crate) struct RegisterUser {
     user_email: String,
     user_password_hash: String,
     key: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(utoipa::ToSchema, Serialize, Deserialize, Debug)]
 pub(crate) struct RegisterUserResponse {
     id: i64,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/user",
+    tag = "Users",
+    responses(
+        (status=OK, body=RegisterUserResponse, description="User id"),
+        (status=BAD_REQUEST, description="Failed to register user"),
+        (status=CONFLICT, description="Email is already taken"),
+    ),
+    request_body=RegisterUser
+)]
 pub(crate) async fn register_user(
     State(st): State<HandlerState>,
     Json(params): Json<RegisterUser>,
@@ -579,17 +683,31 @@ pub(crate) async fn register_user(
 // GROUPS endpoints
 // ==============================
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(utoipa::ToSchema, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub(crate) struct GetGroupItem {
     email: String,
     user_id: i64,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(utoipa::ToSchema, Serialize, Deserialize, Debug)]
 pub(crate) struct GetGroupResponse {
     members: Vec<GetGroupItem>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/group/{group_id}/members",
+    tag = "Groups",
+    responses(
+        (status=OK, body=GetGroupResponse, description="Group members"),
+        (status=BAD_REQUEST, description="Failed to get group members"),
+        (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding"),
+    ),
+    params(
+        ("group_id" = i64, Path, description = "Group id"),
+        UserAuth,
+    )
+)]
 pub(crate) async fn get_group_by_id(
     Path(group_id): Path<i64>,
     State(st): State<HandlerState>,
@@ -625,10 +743,24 @@ pub(crate) async fn get_group_by_id(
     (StatusCode::OK, Json(GetGroupResponse { members })).into_response()
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(utoipa::ToSchema, Serialize, Deserialize, Debug)]
 pub(crate) struct GetGroupKeyResponse {
     encrypted_key: Vec<u8>,
 }
+#[utoipa::path(
+    get,
+    path = "/api/v1/group/{group_id}/key",
+    tag = "Groups",
+    responses(
+        (status=OK, body=GetGroupKeyResponse, description="Group key"),
+        (status=BAD_REQUEST, description="Failed to get group key"),
+        (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding"),
+    ),
+    params(
+        ("group_id" = i64, Path, description = "Group id"),
+        UserAuth,
+    )
+)]
 pub(crate) async fn get_group_key_by_id(
     Path(group_id): Path<i64>,
     State(st): State<HandlerState>,
@@ -637,8 +769,8 @@ pub(crate) async fn get_group_key_by_id(
     let (tx, rx) = oneshot::channel();
     st.tx
         .send(DatabaseCommand::GetGroupKey {
-            group_id: group_id,
-            user_id: user_id,
+            group_id,
+            user_id,
             responder: tx,
         })
         .await
@@ -654,10 +786,25 @@ pub(crate) async fn get_group_key_by_id(
     (StatusCode::OK, Json(GetGroupKeyResponse { encrypted_key })).into_response()
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(utoipa::ToSchema, Serialize, Deserialize, Debug)]
 pub(crate) struct GetGroupByMembersResponse {
     group_id: i64,
 }
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/group",
+    tag = "Groups",
+    responses(
+        (status=OK, body=GetGroupByMembersResponse, description="Group id"),
+        (status=BAD_REQUEST, description="Failed to get group id"),
+        (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding"),
+    ),
+    params(
+        UserAuth,
+    ),
+    request_body = GetGroupResponse
+)]
 pub(crate) async fn get_group_by_members(
     State(st): State<HandlerState>,
     Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
@@ -717,20 +864,36 @@ pub(crate) async fn get_group_by_members(
     }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(utoipa::ToSchema, Deserialize, Serialize, Debug)]
 pub(crate) struct CreateGroupItem {
     user_id: i64,
     email: String,
     encrypted_key: Vec<u8>,
 }
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(utoipa::ToSchema, Deserialize, Serialize, Debug)]
 pub(crate) struct CreateGroupBody {
     members: Vec<CreateGroupItem>,
 }
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(utoipa::ToSchema, Serialize, Deserialize, Debug)]
 pub(crate) struct CreateGroupResponse {
     group_id: i64,
 }
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/group",
+    tag = "Groups",
+    responses(
+        (status=OK, body=CreateGroupResponse, description="Group id"),
+        (status=BAD_REQUEST, description="Failed to create group"),
+        (status=CONFLICT, description="Group already exists"),
+        (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding"),
+    ),
+    params(
+        UserAuth,
+    ),
+    request_body = CreateGroupBody
+)]
 pub(crate) async fn create_group(
     State(st): State<HandlerState>,
     Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
@@ -807,15 +970,29 @@ pub(crate) async fn create_group(
     (StatusCode::OK, Json(CreateGroupResponse { group_id })).into_response()
 }
 
-#[derive(Serialize, Debug)]
+#[derive(utoipa::ToSchema, Serialize, Debug)]
 pub(crate) struct ListGroupsItem {
     group_id: i64,
     name: String,
 }
-#[derive(Serialize, Debug)]
+#[derive(utoipa::ToSchema, Serialize, Debug)]
 pub(crate) struct ListGroupsResponse {
     groups: Vec<ListGroupsItem>,
 }
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/list-groups",
+    tag = "Groups",
+    responses(
+        (status=OK, body=ListGroupsResponse, description="Groups"),
+        (status=BAD_REQUEST, description="Failed to list groups"),
+        (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding"),
+    ),
+    params(
+        UserAuth,
+    )
+)]
 pub(crate) async fn list_groups(
     State(st): State<HandlerState>,
     Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
@@ -859,6 +1036,7 @@ mod tests {
     use axum::{
         Router,
         http::Request,
+        middleware::from_fn_with_state,
         routing::{get, post},
     };
     use http_body_util::BodyExt;
@@ -875,6 +1053,18 @@ mod tests {
     // ==============================
     // AUTH endpoints
     // ==============================
+    // dummy endpoint for testing that auth works
+    async fn hello() -> &'static str {
+        "This is the ACM E2E file sharing server instance."
+    }
+    // helper function that way we don't have to write .layer
+    // on every authenticated endpoint
+    pub(crate) fn authenticated(
+        state: &HandlerState,
+        a: axum::routing::MethodRouter<HandlerState>,
+    ) -> axum::routing::MethodRouter<HandlerState> {
+        a.layer(from_fn_with_state(state.clone(), user_auth))
+    }
 
     #[tokio::test]
     async fn test_hello() {
