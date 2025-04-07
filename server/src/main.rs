@@ -3,13 +3,20 @@ mod db;
 
 use std::env;
 
-use api::{HandlerState, authenticated, connection_task, get_group_by_id};
-use axum::{
-    Router,
-    routing::{get, post},
-};
+use api::{HandlerState, connection_task};
+use axum::middleware;
 
 use rusqlite::Connection;
+use utoipa::OpenApi;
+use utoipa_axum::{router::OpenApiRouter, routes};
+
+#[derive(OpenApi)]
+#[openapi(info(
+    title = "E2EE File Sharing API",
+    description = "API for E2EE file sharing",
+    version = "0.1.0",
+))]
+struct ApiDoc;
 
 #[tokio::main]
 async fn main() {
@@ -28,30 +35,39 @@ async fn main() {
         upload_directory,
     };
     let _ = tokio::spawn(connection_task(conn, rx));
-    let auth = |a| authenticated(&state, a);
 
     // make app
-    let app = Router::new()
-        .route("/api/v1/list-files", auth(get(api::list_files)))
-        .route("/api/v1/file", auth(get(api::get_file)))
-        .route("/api/v1/file", auth(post(api::upload_file)))
-        .route("/api/v1/file/{file_id}/info", auth(get(api::get_file_info)))
-        .route("/api/v1/user/info", auth(get(api::get_user_info)))
-        .route("/api/v1/user/key", auth(get(api::get_user_key)))
-        .route("/api/v1/user", post(api::register_user))
-        .route(
-            "/api/v1/group/{group_id}/members",
-            auth(get(get_group_by_id)),
-        )
-        .route(
-            "/api/v1/group/{group_id}/key",
-            auth(get(api::get_group_key_by_id)),
-        )
-        .route("/api/v1/group", auth(get(api::get_group_by_members)))
-        .route("/api/v1/group", auth(post(api::create_group)))
-        .route("/api/v1/list-groups", auth(get(api::list_groups)))
-        .route("/", get(api::hello))
-        .with_state(state);
+    // but in two parts, one for endpoints requiring auth
+    // and one for those that don't
+    let (auth_app, auth_openapi) = OpenApiRouter::with_openapi(ApiDoc::openapi())
+        .routes(routes!(api::list_files))
+        .routes(routes!(api::get_file))
+        .routes(routes!(api::upload_file))
+        .routes(routes!(api::get_file_info))
+        .routes(routes!(api::get_user_info))
+        .routes(routes!(api::get_user_key))
+        .routes(routes!(api::get_group_by_id))
+        .routes(routes!(api::get_group_key_by_id))
+        .routes(routes!(api::get_group_by_members))
+        .routes(routes!(api::create_group))
+        .routes(routes!(api::list_groups))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            api::user_auth,
+        ))
+        .with_state(state.clone())
+        .split_for_parts();
+    let (unauth_app, unauth_openapi) = OpenApiRouter::new()
+        .routes(routes!(api::register_user))
+        .with_state(state)
+        .split_for_parts();
+
+    // merge apps together and add swagger
+    let app = auth_app.merge(unauth_app);
+    let openapi = auth_openapi.merge_from(unauth_openapi);
+    let app = app.merge(
+        utoipa_swagger_ui::SwaggerUi::new("/swagger-ui").url("/api/v1/openapi.json", openapi),
+    );
 
     // start server
     let bind_addr = std::env::var("EFS_SERVER_LISTEN").unwrap_or("127.0.0.1:8091".to_string());

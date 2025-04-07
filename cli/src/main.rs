@@ -1,6 +1,5 @@
 use clap::{Parser, Subcommand};
 use cli::{download, get_user_info, register, upload};
-mod api;
 use rpassword::read_password;
 use std::{
     env, fs,

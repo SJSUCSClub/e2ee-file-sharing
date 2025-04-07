@@ -5,13 +5,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-mod api;
-use api::{
-    CreateGroupBody, CreateGroupItem, CreateGroupResponse, GetGroupItem, GetGroupKeyResponse,
-    GetGroupResponse, GetUserInfoResponse, GetUserKeyResponse, ListFilesItem, UploadFileResponse,
-};
 use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE, Engine as _};
 use corelib::client::{DiskKeys, EncryptedFile, GroupKey, PersonalKey, PkKeyPair};
+use models::*;
 use reqwest::{StatusCode, blocking::multipart};
 use rpassword::read_password;
 use rsa::pkcs8::DecodePublicKey;
@@ -56,7 +52,7 @@ pub fn get_user_info(
             resp.text()?
         )));
     }
-    let info: GetUserInfoResponse = resp.json()?;
+    let info: UserId = resp.json()?;
     let user_id = info.user_id;
     Ok((kp, encoded_password, user_id))
 }
@@ -160,8 +156,11 @@ fn get_group_key(
             resp.text()?
         )));
     }
-    let group_key_response: GetGroupKeyResponse = resp.json()?;
-    let group_key = kp.get_group_key(&group_key_response.encrypted_key);
+    let group_key_response: Key = resp.json()?; // gets the encoded, encrypted aes group key
+    // decode it
+    let group_key_decoded = BASE64_STANDARD.decode(&group_key_response.key)?;
+    // and finally decrypt it
+    let group_key = kp.get_group_key(&group_key_decoded);
     Ok(group_key)
 }
 
@@ -202,7 +201,7 @@ pub fn download(
         )));
     }
     // parse the response
-    let info: ListFilesItem = resp.json()?;
+    let info: FileInfo = resp.json()?;
     let output_path = match output {
         Some(path) => path,
         None => {
@@ -266,7 +265,7 @@ fn create_group(
     email: &str,
     encoded_password: &str,
     ids: Vec<i64>,
-    members: GetGroupResponse,
+    members: GroupMembers,
     client: &reqwest::blocking::Client,
 ) -> Result<i64, Box<dyn Error>> {
     // need to make a group
@@ -283,9 +282,11 @@ fn create_group(
                 resp.text()?
             )));
         }
-        let key_response: GetUserKeyResponse = resp.json()?;
-        let s = String::from_utf8(key_response.key)?;
-        let pkpub = DecodePublicKey::from_public_key_pem(&s)?;
+        // base-64 encoded pem
+        let key_response: Key = resp.json()?;
+        let key_decoded = BASE64_STANDARD.decode(key_response.key)?;
+        let pem = String::from_utf8(key_decoded)?;
+        let pkpub = DecodePublicKey::from_public_key_pem(&pem)?;
         pkpubs.push(pkpub);
     }
     // create group for all users
@@ -294,13 +295,13 @@ fn create_group(
         .members
         .into_iter()
         .zip(group.into_iter())
-        .map(|(m, key)| CreateGroupItem {
-            email: m.email,
+        .map(|(m, key)| UserWithKey {
+            user_email: m.user_email,
             user_id: m.user_id,
-            encrypted_key: key,
+            key: BASE64_STANDARD.encode(key),
         })
         .collect();
-    let members = CreateGroupBody { members };
+    let members = GroupMembersWithKey { members };
     let resp = client
         .post(format!(
             "{server_url}/api/v1/group?user_email={email}&user_password_hash={encoded_password}",
@@ -314,7 +315,7 @@ fn create_group(
             resp.text()?
         )));
     }
-    let group_id_response: CreateGroupResponse = resp.json()?;
+    let group_id_response: GroupId = resp.json()?;
     Ok(group_id_response.group_id)
 }
 
@@ -344,12 +345,12 @@ fn get_or_create_group(
     // put emails and ids together
     let mut members = Vec::new();
     for (email, id) in emails.into_iter().zip(ids.iter()) {
-        members.push(GetGroupItem {
-            email,
+        members.push(User {
+            user_email: email,
             user_id: *id,
         });
     }
-    let members = GetGroupResponse { members };
+    let members = GroupMembers { members };
 
     // make request to group endpoint
     let resp = client
@@ -370,7 +371,7 @@ fn get_or_create_group(
         )?)
     } else if resp.status().is_success() {
         // group already exists
-        let group_id_response: CreateGroupResponse = resp.json()?;
+        let group_id_response: GroupId = resp.json()?;
         Ok(group_id_response.group_id)
     } else {
         return Err(Box::from(format!(
@@ -450,7 +451,7 @@ pub fn upload(
     let file_part = multipart::Part::bytes(postcard::to_allocvec(&encrypted_file)?)
         .file_name(file.file_name().unwrap().to_str().unwrap().to_string())
         .mime_str("application/octet-stream")?;
-    let form = multipart::Form::new().part("file_field", file_part);
+    let form = multipart::Form::new().part("file", file_part);
     let resp = client
         .post(format!(
             "{server_url}/api/v1/file?group_id={group_id}&user_email={email}&user_password_hash={encoded_password}",
@@ -465,6 +466,6 @@ pub fn upload(
         )));
     }
 
-    let result: UploadFileResponse = resp.json()?;
+    let result: FileId = resp.json()?;
     Ok(result.file_id)
 }
