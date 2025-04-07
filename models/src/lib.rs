@@ -20,18 +20,18 @@ pub struct FileInfos {
 }
 
 #[derive(utoipa::ToSchema, Serialize, Deserialize, Debug)]
-pub struct FileID {
+pub struct FileId {
     /// the id of the file, guaranteed to be unique
     pub file_id: i64,
 }
 
 #[derive(utoipa::ToSchema, Serialize, Deserialize, Debug)]
-pub struct UserID {
+pub struct UserId {
     /// the id of the user, guaranteed to be unique
     pub user_id: i64,
 }
 #[derive(utoipa::ToSchema, Serialize, Deserialize, Debug)]
-pub struct GroupID {
+pub struct GroupId {
     /// the id of the group, guaranteed to be unique
     pub group_id: i64,
 }

@@ -52,7 +52,7 @@ pub fn get_user_info(
             resp.text()?
         )));
     }
-    let info: UserID = resp.json()?;
+    let info: UserId = resp.json()?;
     let user_id = info.user_id;
     Ok((kp, encoded_password, user_id))
 }
@@ -315,7 +315,7 @@ fn create_group(
             resp.text()?
         )));
     }
-    let group_id_response: GroupID = resp.json()?;
+    let group_id_response: GroupId = resp.json()?;
     Ok(group_id_response.group_id)
 }
 
@@ -371,7 +371,7 @@ fn get_or_create_group(
         )?)
     } else if resp.status().is_success() {
         // group already exists
-        let group_id_response: GroupID = resp.json()?;
+        let group_id_response: GroupId = resp.json()?;
         Ok(group_id_response.group_id)
     } else {
         return Err(Box::from(format!(
@@ -466,6 +466,6 @@ pub fn upload(
         )));
     }
 
-    let result: FileID = resp.json()?;
+    let result: FileId = resp.json()?;
     Ok(result.file_id)
 }

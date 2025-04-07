@@ -403,7 +403,7 @@ struct FileForm {
     path = "/api/v1/file",
     tag = "Files",
     responses(
-        (status=OK, body=FileID, description="File id"),
+        (status=OK, body=FileId, description="File id"),
         (status=BAD_REQUEST, description="Failed to get group or user not in group"),
         (status=INTERNAL_SERVER_ERROR, description="Failed to save file or database error"),
         (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding")
@@ -478,7 +478,7 @@ pub(crate) async fn upload_file(
                     return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to save file")
                         .into_response();
                 } else {
-                    return (StatusCode::OK, Json(FileID { file_id })).into_response();
+                    return (StatusCode::OK, Json(FileId { file_id })).into_response();
                 }
             }
             // ignore other fields
@@ -546,7 +546,7 @@ pub(crate) async fn get_file_info(
     path = "/api/v1/user/info",
     tag = "Users",
     responses(
-        (status=OK, body=UserID, description="User info"),
+        (status=OK, body=UserId, description="User info"),
         (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding")
     ),
     params(
@@ -556,7 +556,7 @@ pub(crate) async fn get_file_info(
 pub(crate) async fn get_user_info(
     Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
 ) -> impl IntoResponse {
-    (StatusCode::OK, Json(UserID { user_id: user_id }))
+    (StatusCode::OK, Json(UserId { user_id: user_id }))
 }
 
 #[derive(utoipa::IntoParams, Deserialize, Debug)]
@@ -611,7 +611,7 @@ pub(crate) async fn get_user_key(
     path = "/api/v1/user",
     tag = "Users",
     responses(
-        (status=OK, body=UserID, description="User ID"),
+        (status=OK, body=UserId, description="User Id"),
         (status=BAD_REQUEST, description="Failed to register user"),
         (status=CONFLICT, description="Email is already taken"),
     ),
@@ -648,7 +648,7 @@ pub(crate) async fn register_user(
             return (StatusCode::CONFLICT, "Email is already taken").into_response();
         }
     };
-    (StatusCode::OK, Json(UserID { user_id: id })).into_response()
+    (StatusCode::OK, Json(UserId { user_id: id })).into_response()
 }
 
 // ==============================
@@ -749,7 +749,7 @@ pub(crate) async fn get_group_key_by_id(
     (StatusCode::OK, Json(Key { key })).into_response()
 }
 
-/// Get the group ID for the group
+/// Get the group Id for the group
 /// containing the given members
 #[utoipa::path(
     get,
@@ -763,7 +763,7 @@ pub(crate) async fn get_group_key_by_id(
     params(
         UserAuth,
     ),
-    request_body = GroupID
+    request_body = GroupId
 )]
 pub(crate) async fn get_group_by_members(
     State(st): State<HandlerState>,
@@ -817,7 +817,7 @@ pub(crate) async fn get_group_by_members(
 
     // return either the group id or a 404
     match group_id {
-        Some(group_id) => (StatusCode::OK, Json(GroupID { group_id })).into_response(),
+        Some(group_id) => (StatusCode::OK, Json(GroupId { group_id })).into_response(),
         None => (StatusCode::NOT_FOUND, "No such group exists").into_response(),
     }
 }
@@ -828,7 +828,7 @@ pub(crate) async fn get_group_by_members(
     path = "/api/v1/group",
     tag = "Groups",
     responses(
-        (status=OK, body=GroupID, description="Group id"),
+        (status=OK, body=GroupId, description="Group id"),
         (status=BAD_REQUEST, description="Failed to create group"),
         (status=CONFLICT, description="Group already exists"),
         (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding"),
@@ -889,7 +889,7 @@ pub(crate) async fn create_group(
     };
     if let Some(group_id) = group_id {
         // then return 409 and the group id
-        return (StatusCode::CONFLICT, Json(GroupID { group_id })).into_response();
+        return (StatusCode::CONFLICT, Json(GroupId { group_id })).into_response();
     }
     // so now actually create group
     let (tx, rx) = oneshot::channel();
@@ -911,7 +911,7 @@ pub(crate) async fn create_group(
             return (StatusCode::BAD_REQUEST, "Failed to create group").into_response();
         }
     };
-    (StatusCode::OK, Json(GroupID { group_id })).into_response()
+    (StatusCode::OK, Json(GroupId { group_id })).into_response()
 }
 
 /// List all groups that the user has access to
@@ -1363,7 +1363,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let body: FileID = serde_json::from_slice(&body).unwrap();
+        let body: FileId = serde_json::from_slice(&body).unwrap();
         assert_eq!(body.file_id, 1);
         let contents = tokio::fs::read_to_string(to_path(upload_directory, 1))
             .await
@@ -1502,7 +1502,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let body: UserID = serde_json::from_slice(&body).unwrap();
+        let body: UserId = serde_json::from_slice(&body).unwrap();
         assert_eq!(body.user_id, 1);
     }
 
@@ -1780,7 +1780,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let body: GroupID = serde_json::from_slice(&body).unwrap();
+        let body: GroupId = serde_json::from_slice(&body).unwrap();
         assert_eq!(body.group_id, 1);
 
         // try one where the group doesn't exist
@@ -1909,7 +1909,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let body: GroupID = serde_json::from_slice(&body).unwrap();
+        let body: GroupId = serde_json::from_slice(&body).unwrap();
         assert_eq!(body.group_id, 1);
         let conn = Connection::open("/tmp/test_create_group.db").unwrap();
         let recovered_key = conn
@@ -2022,7 +2022,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let body: GroupID = serde_json::from_slice(&body).unwrap();
+        let body: GroupId = serde_json::from_slice(&body).unwrap();
         assert_eq!(body.group_id, 1);
     }
 
@@ -2068,7 +2068,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let response_user: UserID = from_slice(&body).unwrap();
+        let response_user: UserId = from_slice(&body).unwrap();
         assert!(response_user.user_id > 0);
     }
 }
