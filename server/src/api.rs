@@ -32,9 +32,6 @@ fn to_path(upload_directory: &str, file_id: i64) -> String {
 // ==============================
 #[derive(Clone)]
 pub(crate) struct HandlerState {
-    // TODO - differentiate between the fact that we have
-    // readers and writers, and there can be multiple readers
-    // at the same time, but only one writer at a time
     pub tx: Sender<DatabaseCommand>,
     pub upload_directory: String,
     pub new_db: Arc<Box<dyn Fn() -> Database + Send + Sync>>,
