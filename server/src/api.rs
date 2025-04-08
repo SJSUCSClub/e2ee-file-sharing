@@ -8,21 +8,17 @@ use axum::{
 };
 use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE, Engine as _};
 use corelib::server::{make_salt, salt_password};
-
 use models::*;
-use rusqlite::Connection;
 use serde::Deserialize;
+use std::cell::RefCell;
+use std::sync::Arc;
 use tokio::sync::{
     mpsc::{self, Sender},
     oneshot,
 };
 use tokio_util::io::ReaderStream;
 
-use crate::db;
-use crate::db::{
-    create_group as create_group_db, get_existing_users, get_files_for_user_id, get_group,
-    get_group_id, get_group_key, get_groups_for_user_id, get_user_id, insert_file,
-};
+use crate::db::{self, Database};
 
 // ==============================
 // Misc
@@ -41,57 +37,38 @@ pub(crate) struct HandlerState {
     // at the same time, but only one writer at a time
     pub tx: Sender<DatabaseCommand>,
     pub upload_directory: String,
+    pub new_db: Arc<Box<dyn Fn() -> Database + Send + Sync>>,
+}
+
+impl HandlerState {
+    thread_local! {
+        static DB: RefCell<Option<Database>> = const { RefCell::new(None) };
+    }
+
+    // https://www.reddit.com/r/rust/comments/1e6dqz1/thread_local_smart_pointer/
+    // hence `RefCell::borrow_mut` is not available, hence the need to use a closure.
+
+    pub fn run_with_db<F, R>(st: &HandlerState, callback: F) -> R
+    where
+        F: FnOnce(&Database) -> R,
+    {
+        HandlerState::DB.with_borrow_mut(|opt| {
+            let db = opt.get_or_insert_with(|| (st.new_db)());
+            callback(&db)
+        })
+    }
 }
 
 // task thread that manages a connection
 pub(crate) enum DatabaseCommand {
-    GetUserId {
-        user_email: String,
-        user_password_hash: Vec<u8>,
-        responder: oneshot::Sender<rusqlite::Result<i64>>,
-    },
-    GetUserKey {
-        user_id: i64,
-        responder: oneshot::Sender<rusqlite::Result<Vec<u8>>>,
-    },
-    GetFilesForUserId {
-        user_id: i64,
-        responder: oneshot::Sender<rusqlite::Result<Vec<(String, i64, String, i64)>>>,
-    },
     InsertFile {
         group_id: i64,
         filename: String,
         responder: oneshot::Sender<rusqlite::Result<i64>>,
     },
-    GetFileInfo {
-        file_id: i64,
-        user_id: i64,
-        responder: oneshot::Sender<rusqlite::Result<(String, String, i64)>>,
-    },
-    GetGroupById {
-        group_id: i64,
-        responder: oneshot::Sender<rusqlite::Result<Vec<(String, i64)>>>,
-    },
-    GetGroupKey {
-        group_id: i64,
-        user_id: i64,
-        responder: oneshot::Sender<rusqlite::Result<Vec<u8>>>,
-    },
-    GetGroupByMembers {
-        members: Vec<i64>,
-        responder: oneshot::Sender<rusqlite::Result<Option<i64>>>,
-    },
     CreateGroup {
         members: Vec<(i64, Vec<u8>)>,
         responder: oneshot::Sender<rusqlite::Result<i64>>,
-    },
-    ListGroups {
-        user_id: i64,
-        responder: oneshot::Sender<rusqlite::Result<Vec<(i64, String)>>>,
-    },
-    GetExistingUsers {
-        users: Vec<(i64, String)>,
-        responder: oneshot::Sender<rusqlite::Result<Vec<(i64, String)>>>,
     },
     RegisterUser {
         user_email: String,
@@ -101,77 +78,21 @@ pub(crate) enum DatabaseCommand {
         responder: oneshot::Sender<rusqlite::Result<i64>>,
     },
 }
-pub(crate) async fn connection_task(conn: Connection, mut rx: mpsc::Receiver<DatabaseCommand>) {
+pub(crate) async fn connection_task(mut db: Database, mut rx: mpsc::Receiver<DatabaseCommand>) {
     use DatabaseCommand::*;
     while let Some(cmd) = rx.recv().await {
         match cmd {
-            GetUserId {
-                user_email,
-                user_password_hash,
-                responder,
-            } => {
-                responder
-                    .send(get_user_id(
-                        &conn,
-                        &user_email,
-                        user_password_hash.as_slice(),
-                    ))
-                    .unwrap();
-            }
-            GetFilesForUserId { user_id, responder } => {
-                responder
-                    .send(get_files_for_user_id(&conn, user_id))
-                    .unwrap();
-            }
-            GetFileInfo {
-                file_id,
-                user_id,
-                responder,
-            } => {
-                responder
-                    .send(db::get_file_info(&conn, user_id, file_id))
-                    .unwrap();
-            }
             InsertFile {
                 group_id,
                 filename,
                 responder,
             } => {
                 responder
-                    .send(insert_file(&conn, group_id, &filename))
+                    .send(db::insert_file(&mut db, group_id, &filename))
                     .unwrap();
-            }
-            GetGroupById {
-                group_id,
-                responder,
-            } => {
-                responder.send(get_group(&conn, group_id)).unwrap();
-            }
-            GetGroupKey {
-                group_id,
-                user_id,
-                responder,
-            } => {
-                responder
-                    .send(get_group_key(&conn, group_id, user_id))
-                    .unwrap();
-            }
-            GetGroupByMembers { members, responder } => {
-                responder.send(get_group_id(&conn, &members)).unwrap();
             }
             CreateGroup { members, responder } => {
-                responder.send(create_group_db(&conn, members)).unwrap();
-            }
-            ListGroups { user_id, responder } => {
-                responder
-                    .send(get_groups_for_user_id(&conn, user_id))
-                    .unwrap();
-            }
-            GetExistingUsers { users, responder } => {
-                responder.send(get_existing_users(&conn, users)).unwrap();
-            }
-            GetUserKey { user_id, responder } => {
-                responder.send(db::get_user_key(&conn, user_id)).unwrap();
+                responder.send(db::create_group(&mut db, members)).unwrap();
             }
             RegisterUser {
                 user_email,
@@ -182,7 +103,7 @@ pub(crate) async fn connection_task(conn: Connection, mut rx: mpsc::Receiver<Dat
             } => {
                 responder
                     .send(db::register_user(
-                        &conn,
+                        &mut db,
                         &user_email,
                         user_password_hash,
                         salt,
@@ -218,7 +139,7 @@ pub(crate) async fn user_auth(
     mut request: Request,
     next: Next,
 ) -> Response {
-    // send request
+    // decode password
     let decoded_password = match BASE64_URL_SAFE.decode(params.user_password_hash) {
         Ok(decoded) => decoded,
         Err(e) => {
@@ -226,17 +147,12 @@ pub(crate) async fn user_auth(
             return (StatusCode::UNAUTHORIZED, "Invalid base64 encoding").into_response();
         }
     };
-    let (tx, rx) = oneshot::channel();
-    st.tx
-        .send(DatabaseCommand::GetUserId {
-            user_email: params.user_email,
-            user_password_hash: decoded_password,
-            responder: tx,
-        })
-        .await
-        .unwrap();
-    // and double check
-    let user_id = match rx.await.unwrap() {
+
+    // query db
+    let user_id = HandlerState::run_with_db(&st, |db| {
+        db::get_user_id(db, &params.user_email, &decoded_password)
+    });
+    let user_id = match user_id {
         Ok(user_id) => user_id,
         Err(e) => {
             println!("Failed to authenticate user with {e:?}");
@@ -276,23 +192,15 @@ pub(crate) async fn list_files(
     State(st): State<HandlerState>,
     Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
 ) -> impl IntoResponse {
-    // initialize/send request
-    let (tx, rx) = oneshot::channel();
-    st.tx
-        .send(DatabaseCommand::GetFilesForUserId {
-            user_id: user_id,
-            responder: tx,
-        })
-        .await
-        .unwrap();
     // get all files that match this user id
-    let files_vec = match rx.await.unwrap() {
-        Ok(files) => files,
-        Err(e) => {
-            println!("Error getting files: {e:?}!");
-            return (StatusCode::BAD_REQUEST, "Failed to get files!").into_response();
-        }
-    };
+    let files_vec =
+        match HandlerState::run_with_db(&st, |db| db::get_files_for_user_id(db, user_id)) {
+            Ok(files) => files,
+            Err(e) => {
+                println!("Error getting files: {e:?}!");
+                return (StatusCode::BAD_REQUEST, "Failed to get files!").into_response();
+            }
+        };
 
     // return the files, as proper response
     let files = files_vec
@@ -335,29 +243,19 @@ pub(crate) async fn get_file(
     Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
 ) -> Response {
     // authentication succeeded, proceed to get the file storage location
-    // first, initialize request to the connection thread
-    let (tx, rx) = oneshot::channel();
-    st.tx
-        .send(DatabaseCommand::GetFileInfo {
-            file_id: params.file_id,
-            user_id,
-            responder: tx,
-        })
-        .await
-        .unwrap();
-
-    // and the file name
-    let info = match rx.await.unwrap() {
-        Ok(info) => info,
-        Err(e) => {
-            println!("Nonexistent file or permission denied {e:?}");
-            return (
-                StatusCode::BAD_REQUEST,
-                "Nonexistent file or permission denied",
-            )
-                .into_response();
-        }
-    };
+    // get the file name
+    let info =
+        match HandlerState::run_with_db(&st, |db| db::get_file_info(db, user_id, params.file_id)) {
+            Ok(info) => info,
+            Err(e) => {
+                println!("Nonexistent file or permission denied {e:?}");
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "Nonexistent file or permission denied",
+                )
+                    .into_response();
+            }
+        };
     let path = to_path(&st.upload_directory, params.file_id);
 
     // open file
@@ -421,15 +319,8 @@ pub(crate) async fn upload_file(
     mut multipart: Multipart,
 ) -> Response {
     // check if user is in the group
-    let (tx, rx) = oneshot::channel();
-    st.tx
-        .send(DatabaseCommand::GetGroupById {
-            group_id: params.group_id,
-            responder: tx,
-        })
-        .await
-        .unwrap();
-    let group = match rx.await.unwrap() {
+    // since this is a read, then we can use threadlocal read-only connection
+    let group = match HandlerState::run_with_db(&st, |db| db::get_group(db, params.group_id)) {
         Ok(group) => group,
         Err(e) => {
             println!("Failed to get group {e:?}");
@@ -440,6 +331,7 @@ pub(crate) async fn upload_file(
         return (StatusCode::BAD_REQUEST, "User not in group").into_response();
     }
 
+    // now actually do the writing
     while let Some(field) = multipart.next_field().await.unwrap() {
         let field_name = field.name();
         match field_name {
@@ -508,17 +400,8 @@ pub(crate) async fn get_file_info(
     Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
     State(st): State<HandlerState>,
 ) -> Response {
-    // send request to db thread
-    let (tx, rx) = oneshot::channel();
-    st.tx
-        .send(DatabaseCommand::GetFileInfo {
-            file_id: file_id,
-            user_id: user_id,
-            responder: tx,
-        })
-        .await
-        .unwrap();
-    match rx.await.unwrap() {
+    // get read-only database connection
+    match HandlerState::run_with_db(&st, |db| db::get_file_info(db, user_id, file_id)) {
         Ok(info) => (
             StatusCode::OK,
             Json(FileInfo {
@@ -556,7 +439,7 @@ pub(crate) async fn get_file_info(
 pub(crate) async fn get_user_info(
     Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
 ) -> impl IntoResponse {
-    (StatusCode::OK, Json(UserId { user_id: user_id }))
+    (StatusCode::OK, Json(UserId { user_id }))
 }
 
 #[derive(utoipa::IntoParams, Deserialize, Debug)]
@@ -585,16 +468,9 @@ pub(crate) async fn get_user_key(
     Extension(_): Extension<UserAuthExtension>,
     State(st): State<HandlerState>,
 ) -> Response {
-    // send request to db thread
-    let (tx, rx) = oneshot::channel();
-    st.tx
-        .send(DatabaseCommand::GetUserKey {
-            user_id: params.target_user_id,
-            responder: tx,
-        })
-        .await
-        .unwrap();
-    let key = match rx.await.unwrap() {
+    // get db
+    let key = match HandlerState::run_with_db(&st, |db| db::get_user_key(db, params.target_user_id))
+    {
         Ok(key) => key,
         Err(e) => {
             println!("Failed to get user key with {e:?}");
@@ -629,13 +505,13 @@ pub(crate) async fn register_user(
     let salt = make_salt();
     let hashed_password2: Vec<u8> = salt_password(password_bytes.as_slice(), &salt);
 
-    // send request to db thread
+    // send request to writing db thread
     let (tx, rx) = oneshot::channel();
     st.tx
         .send(DatabaseCommand::RegisterUser {
             user_email: params.user_email,
             user_password_hash: hashed_password2,
-            salt: salt,
+            salt,
             pub_key: key_bytes,
             responder: tx,
         })
@@ -675,16 +551,8 @@ pub(crate) async fn get_group_by_id(
     State(st): State<HandlerState>,
     Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
 ) -> impl IntoResponse {
-    // make database request
-    let (tx, rx) = oneshot::channel();
-    st.tx
-        .send(DatabaseCommand::GetGroupById {
-            group_id,
-            responder: tx,
-        })
-        .await
-        .unwrap();
-    let group_members = match rx.await.unwrap() {
+    // send request
+    let group_members = match HandlerState::run_with_db(&st, |db| db::get_group(db, group_id)) {
         Ok(group_members) => group_members,
         Err(e) => {
             println!("Failed to get group members with {e:?}");
@@ -728,22 +596,15 @@ pub(crate) async fn get_group_key_by_id(
     State(st): State<HandlerState>,
     Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
 ) -> impl IntoResponse {
-    let (tx, rx) = oneshot::channel();
-    st.tx
-        .send(DatabaseCommand::GetGroupKey {
-            group_id,
-            user_id,
-            responder: tx,
-        })
-        .await
-        .unwrap();
-    let encrypted_key = match rx.await.unwrap() {
-        Ok(encrypted_key) => encrypted_key,
-        Err(e) => {
-            println!("Failed to get group key with {e:?}");
-            return (StatusCode::BAD_REQUEST, "Failed to get group key").into_response();
-        }
-    };
+    // send request
+    let encrypted_key =
+        match HandlerState::run_with_db(&st, |db| db::get_group_key(db, group_id, user_id)) {
+            Ok(encrypted_key) => encrypted_key,
+            Err(e) => {
+                println!("Failed to get group key with {e:?}");
+                return (StatusCode::BAD_REQUEST, "Failed to get group key").into_response();
+            }
+        };
     let key = BASE64_STANDARD.encode(encrypted_key);
 
     (StatusCode::OK, Json(Key { key })).into_response()
@@ -771,19 +632,15 @@ pub(crate) async fn get_group_by_members(
     Json(body): Json<GroupMembers>,
 ) -> impl IntoResponse {
     // validate that all users exist
-    let (tx, rx) = oneshot::channel();
-    st.tx
-        .send(DatabaseCommand::GetExistingUsers {
-            users: body
-                .members
+    let existing_users = match HandlerState::run_with_db(&st, |db| {
+        db::get_existing_users(
+            db,
+            body.members
                 .iter()
                 .map(|m| (m.user_id, m.user_email.clone()))
                 .collect(),
-            responder: tx,
-        })
-        .await
-        .unwrap();
-    let existing_users = match rx.await.unwrap() {
+        )
+    }) {
         Ok(existing_users) => existing_users,
         Err(e) => {
             println!("Failed to get existing users with {e:?}");
@@ -799,15 +656,9 @@ pub(crate) async fn get_group_by_members(
     }
 
     // send request to see if such a group exists
-    let (tx, rx) = oneshot::channel();
-    st.tx
-        .send(DatabaseCommand::GetGroupByMembers {
-            members: body.members.iter().map(|m| m.user_id).collect(),
-            responder: tx,
-        })
-        .await
-        .unwrap();
-    let group_id = match rx.await.unwrap() {
+    let group_id = match HandlerState::run_with_db(&st, |db| {
+        db::get_group_id(db, body.members.iter().map(|m| m.user_id).collect())
+    }) {
         Ok(group_id) => group_id,
         Err(e) => {
             println!("Failed to get group by members with {e:?}");
@@ -844,19 +695,15 @@ pub(crate) async fn create_group(
     Json(body): Json<GroupMembersWithKey>,
 ) -> impl IntoResponse {
     // validate that all users exist
-    let (tx, rx) = oneshot::channel();
-    st.tx
-        .send(DatabaseCommand::GetExistingUsers {
-            users: body
-                .members
+    let existing_users = match HandlerState::run_with_db(&st, |db| {
+        db::get_existing_users(
+            db,
+            body.members
                 .iter()
                 .map(|m| (m.user_id, m.user_email.clone()))
                 .collect(),
-            responder: tx,
-        })
-        .await
-        .unwrap();
-    let existing_users = match rx.await.unwrap() {
+        )
+    }) {
         Ok(existing_users) => existing_users,
         Err(e) => {
             println!("Failed to get existing users with {e:?}");
@@ -871,16 +718,10 @@ pub(crate) async fn create_group(
         return (StatusCode::UNAUTHORIZED, "User not present in group").into_response();
     }
 
-    // first, check if such a group exists
-    let (tx, rx) = oneshot::channel();
-    st.tx
-        .send(DatabaseCommand::GetGroupByMembers {
-            members: body.members.iter().map(|m| m.user_id).collect(),
-            responder: tx,
-        })
-        .await
-        .unwrap();
-    let group_id = match rx.await.unwrap() {
+    // check if such a group exists before creating
+    let group_id = match HandlerState::run_with_db(&st, |db| {
+        db::get_group_id(db, body.members.iter().map(|m| m.user_id).collect())
+    }) {
         Ok(group_id) => group_id,
         Err(e) => {
             println!("Failed to get group by members with {e:?}");
@@ -891,7 +732,7 @@ pub(crate) async fn create_group(
         // then return 409 and the group id
         return (StatusCode::CONFLICT, Json(GroupId { group_id })).into_response();
     }
-    // so now actually create group
+    // so now actually create group with the writeable db
     let (tx, rx) = oneshot::channel();
     st.tx
         .send(DatabaseCommand::CreateGroup {
@@ -932,17 +773,9 @@ pub(crate) async fn list_groups(
     State(st): State<HandlerState>,
     Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
 ) -> impl IntoResponse {
-    // query db
-    let (tx, rx) = oneshot::channel();
-    st.tx
-        .send(DatabaseCommand::ListGroups {
-            user_id: user_id,
-            responder: tx,
-        })
-        .await
-        .unwrap();
     // extract and convert to response type
-    let groups = match rx.await.unwrap() {
+    let groups = match HandlerState::run_with_db(&st, |db| db::get_groups_for_user_id(db, user_id))
+    {
         Ok(groups) => groups,
         Err(e) => {
             println!("Failed to list groups with {e:?}");
@@ -966,8 +799,6 @@ pub(crate) async fn list_groups(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, vec};
-
     use axum::{
         Router,
         http::Request,
@@ -977,8 +808,9 @@ mod tests {
     use http_body_util::BodyExt;
     use rusqlite::params;
     use serde_json::{from_slice, json};
-    // for .collect() for the response
-    use tower::{Service, ServiceExt}; // for .oneshot
+    use std::sync::atomic::AtomicUsize;
+    use std::{fs, vec};
+    use tower::{Service, ServiceExt};
 
     use crate::db;
 
@@ -1024,24 +856,41 @@ mod tests {
         );
     }
 
+    // test id counter
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    fn setup_http_server(upload_directory: &str) -> (Database, HandlerState) {
+        let value = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let db_path = format!("file:{}?mode=memory&cache=shared", value);
+
+        let mut db = Database::open(&db_path).unwrap();
+        db::init_db(&mut db).unwrap();
+
+        // Extra SQLite connection for inspecting and manipulating database contents by the test code
+        let mut db_for_test_harness = Database::open(&db_path).unwrap();
+
+        let (tx, rx) = mpsc::channel(32);
+        tokio::spawn(connection_task(db, rx));
+
+        let state = HandlerState {
+            tx,
+            upload_directory: upload_directory.to_string(),
+            new_db: Arc::new(Box::new(move || Database::open(&db_path).unwrap())),
+        };
+
+        (db_for_test_harness, state)
+    }
+
     #[tokio::test]
     async fn test_auth() {
         // setup
-        let conn = Connection::open_in_memory().unwrap();
-        db::init_db(&conn).unwrap();
+        let (db, state) = setup_http_server("");
         // and add an initial user
         let salt = make_salt();
         let user_password_hash = vec![1u8, 22u8, 33u8, 7u8];
         let server_password_hash = salt_password(&user_password_hash, &salt);
         let encoded_password_hash = BASE64_URL_SAFE.encode(&user_password_hash);
-        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![server_password_hash, salt]).unwrap();
+        db.conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![server_password_hash, salt]).unwrap();
         // initialize state
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
-        let state = HandlerState {
-            tx,
-            upload_directory: "".to_string(),
-        };
-        tokio::spawn(connection_task(conn, rx));
 
         // build app
         let mut app = Router::new()
@@ -1119,8 +968,8 @@ mod tests {
     #[tokio::test]
     async fn test_list_files() {
         // setup
-        let conn = Connection::open_in_memory().unwrap();
-        db::init_db(&conn).unwrap();
+        let (db, state) = setup_http_server("");
+        let conn = &db.conn;
         // and add an initial user and such
         let salt = make_salt();
         let user_password_hash = b"3F2A33".to_vec();
@@ -1140,13 +989,6 @@ mod tests {
             [],
         )
         .unwrap();
-        // initialize state
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
-        let state = HandlerState {
-            tx,
-            upload_directory: "".to_string(),
-        };
-        tokio::spawn(connection_task(conn, rx));
 
         // build app
         let mut app = Router::new()
@@ -1201,9 +1043,9 @@ mod tests {
     async fn test_get_file() {
         // setup
         let _cleaner = TestGetFileCleaner {};
-        let conn = Connection::open_in_memory().unwrap();
-        db::init_db(&conn).unwrap();
         let upload_directory = "/tmp/upload-e2e-test";
+        let (db, state) = setup_http_server(upload_directory);
+        let conn = &db.conn;
         tokio::fs::create_dir_all(upload_directory).await.unwrap();
         // and add an initial user and such
         let salt = make_salt();
@@ -1234,13 +1076,6 @@ mod tests {
         tokio::fs::write(to_path(upload_directory, 2), "SECOND FILE")
             .await
             .unwrap();
-        // initialize state
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
-        let state = HandlerState {
-            tx,
-            upload_directory: upload_directory.to_string(),
-        };
-        tokio::spawn(connection_task(conn, rx));
 
         // build app
         let mut app = Router::new()
@@ -1312,29 +1147,21 @@ mod tests {
     async fn test_upload_file() {
         // setup
         let _cleaner = TestUploadFileCleaner {};
-        let conn = Connection::open_in_memory().unwrap();
-        db::init_db(&conn).unwrap();
         let upload_directory = "/tmp/upload-e2e-test-upload";
+        let (db, state) = setup_http_server(upload_directory);
         tokio::fs::create_dir_all(upload_directory).await.unwrap();
         // and add an initial user and such
         let salt = make_salt();
         let user_password_hash = vec![3u8, 15u8, 2u8, 10u8, 3u8, 3u8];
         let server_password_hash = salt_password(&user_password_hash, &salt);
         let encoded_password_hash = BASE64_URL_SAFE.encode(&user_password_hash);
-        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![server_password_hash, salt]).unwrap();
+        db.conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![server_password_hash, salt]).unwrap();
         // add group and add dummy user
-        conn.execute_batch("
+        db.conn.execute_batch("
             INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00');
             INSERT INTO groups (id) VALUES (NULL), (NULL);
             INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 1, 'group_name', X'00'), (2, 2, 'second', X'00');
         ").unwrap();
-        // initialize state
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
-        let state = HandlerState {
-            tx,
-            upload_directory: upload_directory.to_string(),
-        };
-        tokio::spawn(connection_task(conn, rx));
 
         // build app
         let mut app = Router::new()
@@ -1393,28 +1220,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_file_info() {
-        let conn = Connection::open_in_memory().unwrap();
-        db::init_db(&conn).unwrap();
+        let (db, state) = setup_http_server("");
         // add user
         let salt = make_salt();
         let user_password_hash = vec![11u8, 10u8, 12u8, 11u8, 10u8, 12u8];
         let server_password_hash = salt_password(&user_password_hash, &salt);
         let encoded_password_hash = BASE64_URL_SAFE.encode(&user_password_hash);
-        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![server_password_hash, salt]).unwrap();
-        conn.execute_batch("
+        db.conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![server_password_hash, salt]).unwrap();
+        db.conn.execute_batch("
             INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00');
             INSERT INTO groups (id) VALUES (NULL), (NULL);
             INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 1, 'group_name', X'00'), (2, 2, 'second', X'00');
             INSERT INTO files (group_id, filename) VALUES (1, 'test_file.txt'), (2, 'test_file2.txt');
         ").unwrap();
-
-        // initialize state
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
-        let state = HandlerState {
-            tx,
-            upload_directory: "".to_string(),
-        };
-        tokio::spawn(connection_task(conn, rx));
 
         // build app
         let mut app = Router::new()
@@ -1463,22 +1281,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_user_info() {
-        let conn = Connection::open_in_memory().unwrap();
-        db::init_db(&conn).unwrap();
+        let (db, state) = setup_http_server("");
         // add user
         let salt = make_salt();
         let user_password_hash = vec![12u8, 8u8, 4u8, 13u8, 7u8, 2u8];
         let password_hash = salt_password(&user_password_hash, &salt);
         let encoded_password_hash = BASE64_URL_SAFE.encode(&user_password_hash);
-        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00'), ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00');", params![password_hash, salt]).unwrap();
-
-        // initialize state
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
-        let state = HandlerState {
-            tx,
-            upload_directory: "".to_string(),
-        };
-        tokio::spawn(connection_task(conn, rx));
+        db.conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00'), ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00');", params![password_hash, salt]).unwrap();
 
         // initialize app
         // build app
@@ -1509,22 +1318,13 @@ mod tests {
     #[tokio::test]
     async fn test_get_user_key() {
         // setup
-        let conn = Connection::open_in_memory().unwrap();
-        db::init_db(&conn).unwrap();
+        let (db, state) = setup_http_server("");
         // add user
         let salt = make_salt();
         let user_password_hash = vec![12u8, 12u8, 13u8, 13u8, 7u8, 7u8];
         let password_hash = salt_password(&user_password_hash, &salt);
         let encoded_password_hash = BASE64_URL_SAFE.encode(&user_password_hash);
-        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'e0'), ('test2@test.com', X'00', X'00', X'ef'), ('test3@test.com', X'00', X'00', X'ed');", params![password_hash, salt]).unwrap();
-
-        // initialize state
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
-        let state = HandlerState {
-            tx,
-            upload_directory: "".to_string(),
-        };
-        tokio::spawn(connection_task(conn, rx));
+        db.conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'e0'), ('test2@test.com', X'00', X'00', X'ef'), ('test3@test.com', X'00', X'00', X'ed');", params![password_hash, salt]).unwrap();
 
         // initialize app
         // build app
@@ -1558,28 +1358,21 @@ mod tests {
     #[tokio::test]
     async fn test_get_group_by_id() {
         // setup
-        let conn = Connection::open_in_memory().unwrap();
-        db::init_db(&conn).unwrap();
+        let (db, state) = setup_http_server("");
         // add several users and a group
         let salt = make_salt();
         let user_password_hash = vec![12u8, 12u8, 13u8, 13u8, 7u8, 7u8];
         let password_hash = salt_password(&user_password_hash, &salt);
         let encoded_password_hash = BASE64_URL_SAFE.encode(&user_password_hash);
-        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00'), ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00');", params![password_hash, salt]).unwrap();
-        conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
+        db.conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00'), ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00');", params![password_hash, salt]).unwrap();
+        db.conn
+            .execute("INSERT INTO groups (id) VALUES (NULL);", [])
             .unwrap();
-        conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 1, 'group_name', X'00'), (1, 2, 'group_name', X'00'), (1, 3, 'group_name', X'00');", []).unwrap();
-        conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
+        db.conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 1, 'group_name', X'00'), (1, 2, 'group_name', X'00'), (1, 3, 'group_name', X'00');", []).unwrap();
+        db.conn
+            .execute("INSERT INTO groups (id) VALUES (NULL);", [])
             .unwrap();
-        conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (2, 2, 'group_name', X'00'), (2, 3, 'group_name', X'00');", []).unwrap();
-
-        // initialize state
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
-        let state = HandlerState {
-            tx,
-            upload_directory: "".to_string(),
-        };
-        tokio::spawn(connection_task(conn, rx));
+        db.conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (2, 2, 'group_name', X'00'), (2, 3, 'group_name', X'00');", []).unwrap();
 
         // build app
         let mut app = Router::new()
@@ -1643,28 +1436,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_group_key_by_id() {
-        let conn = Connection::open_in_memory().unwrap();
-        db::init_db(&conn).unwrap();
+        let (db, state) = setup_http_server("");
         let salt = make_salt();
         let user_password_hash = vec![12u8, 12u8, 13u8, 13u8, 7u8, 7u8];
         let password_hash = salt_password(&user_password_hash, &salt);
         let encoded_password_hash = BASE64_URL_SAFE.encode(&user_password_hash);
-        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00'), ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00');", params![password_hash, salt]).unwrap();
-        conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
+        db.conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00'), ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00');", params![password_hash, salt]).unwrap();
+        db.conn
+            .execute("INSERT INTO groups (id) VALUES (NULL);", [])
             .unwrap();
-        conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
+        db.conn
+            .execute("INSERT INTO groups (id) VALUES (NULL);", [])
             .unwrap();
-        conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
+        db.conn
+            .execute("INSERT INTO groups (id) VALUES (NULL);", [])
             .unwrap();
         let key = vec![22u8, 33u8, 11u8];
-        conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 1, 'group_name', X'ef'), (2, 2, 'group_name', X'00'), (2, 3, 'group_name', X'00'), (3, 1, 'group_name', ?);", [&key]).unwrap();
-        // initialize state
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
-        let state = HandlerState {
-            tx,
-            upload_directory: "".to_string(),
-        };
-        tokio::spawn(connection_task(conn, rx));
+        db.conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 1, 'group_name', X'ef'), (2, 2, 'group_name', X'00'), (2, 3, 'group_name', X'00'), (3, 1, 'group_name', ?);", [&key]).unwrap();
 
         // build app
         let mut app = Router::new()
@@ -1735,27 +1523,20 @@ mod tests {
 
     #[tokio::test]
     pub async fn test_get_group_by_members() {
-        let conn = Connection::open_in_memory().unwrap();
-        db::init_db(&conn).unwrap();
+        let (db, state) = setup_http_server("");
         let salt = make_salt();
         let user_password_hash = vec![12u8, 8u8, 4u8, 13u8, 7u8, 2u8];
         let password_hash = salt_password(&user_password_hash, &salt);
         let encoded_password_hash = BASE64_URL_SAFE.encode(&user_password_hash);
 
-        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00'), ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00');", params![&password_hash, &salt]).unwrap();
-        conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
+        db.conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00'), ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00');", params![&password_hash, &salt]).unwrap();
+        db.conn
+            .execute("INSERT INTO groups (id) VALUES (NULL);", [])
             .unwrap();
-        conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
+        db.conn
+            .execute("INSERT INTO groups (id) VALUES (NULL);", [])
             .unwrap();
-        conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 1, 'group_name', X'00'), (1, 2, 'group_name', X'00'), (1, 3, 'group_name', X'00'), (2, 2, 'group_name', X'00'), (2, 3, 'group_name', X'00');", []).unwrap();
-
-        // initialize state
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
-        let state = HandlerState {
-            tx,
-            upload_directory: "".to_string(),
-        };
-        tokio::spawn(connection_task(conn, rx));
+        db.conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 1, 'group_name', X'00'), (1, 2, 'group_name', X'00'), (1, 3, 'group_name', X'00'), (2, 2, 'group_name', X'00'), (2, 3, 'group_name', X'00');", []).unwrap();
 
         // build app
         let mut app = Router::new()
@@ -1844,31 +1625,14 @@ mod tests {
         assert_eq!(&body[..], b"User not present in group");
     }
 
-    struct TestCreateGroupCleaner {}
-    impl Drop for TestCreateGroupCleaner {
-        fn drop(&mut self) {
-            fs::remove_file("/tmp/test_create_group.db").unwrap();
-        }
-    }
-
     #[tokio::test]
     async fn test_create_group() {
-        let _cleaner = TestCreateGroupCleaner {};
-        let conn = Connection::open("/tmp/test_create_group.db").unwrap();
-        db::init_db(&conn).unwrap();
+        let (db, state) = setup_http_server("");
         let salt = make_salt();
         let user_password_hash = vec![12u8, 12u8, 13u8, 13u8, 7u8, 7u8];
         let password_hash = salt_password(&user_password_hash, &salt);
         let encoded_password_hash = BASE64_URL_SAFE.encode(&user_password_hash);
-        conn.execute("INSERT INTO users (email, salt, password_hash, pk_pub) VALUES ('test@test.com', ?, ?, X'00'), ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00');", params![salt, password_hash]).unwrap();
-
-        // initialize state
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
-        let state = HandlerState {
-            tx,
-            upload_directory: "".to_string(),
-        };
-        tokio::spawn(connection_task(conn, rx));
+        db.conn.execute("INSERT INTO users (email, salt, password_hash, pk_pub) VALUES ('test@test.com', ?, ?, X'00'), ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00');", params![salt, password_hash]).unwrap();
 
         // initialize app
         let mut app = Router::new()
@@ -1892,14 +1656,14 @@ mod tests {
                 },
             ],
         };
-        let request_body = serde_json::to_string(&request_body).unwrap();
+        let request_body_good = serde_json::to_string(&request_body).unwrap();
         let request = Request::builder()
             .uri(format!(
                 "/?user_email=test@test.com&user_password_hash={encoded_password_hash}"
             ))
             .header("Content-Type", "application/json")
             .method("POST")
-            .body(Body::from(request_body))
+            .body(Body::from(request_body_good.clone()))
             .unwrap();
         let response = ServiceExt::<Request<Body>>::ready(&mut app)
             .await
@@ -1911,8 +1675,8 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let body: GroupId = serde_json::from_slice(&body).unwrap();
         assert_eq!(body.group_id, 1);
-        let conn = Connection::open("/tmp/test_create_group.db").unwrap();
-        let recovered_key = conn
+        let recovered_key = db
+            .conn
             .query_row(
                 "SELECT encrypted_key FROM groups_user_junction WHERE group_id=1 AND user_id=1",
                 [],
@@ -1920,7 +1684,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(recovered_key, key);
-        let recovered_key2 = conn
+        let recovered_key2 = db
+            .conn
             .query_row(
                 "SELECT encrypted_key FROM groups_user_junction WHERE group_id=1 AND user_id=2",
                 [],
@@ -1991,28 +1756,13 @@ mod tests {
         assert_eq!(&body[..], b"User not present in group");
 
         // try when group already exists
-        let request_body = GroupMembersWithKey {
-            members: vec![
-                UserWithKey {
-                    user_id: 1,
-                    user_email: "test@test.com".to_string(),
-                    key: BASE64_STANDARD.encode(key.to_vec()),
-                },
-                UserWithKey {
-                    user_id: 2,
-                    user_email: "test2@test.com".to_string(),
-                    key: BASE64_STANDARD.encode(key2.to_vec()),
-                },
-            ],
-        };
-        let request_body = serde_json::to_string(&request_body).unwrap();
         let request = Request::builder()
             .uri(format!(
                 "/?user_email=test@test.com&user_password_hash={encoded_password_hash}"
             ))
             .header("Content-Type", "application/json")
             .method("POST")
-            .body(Body::from(request_body))
+            .body(Body::from(request_body_good))
             .unwrap();
         let response = ServiceExt::<Request<Body>>::ready(&mut app)
             .await
@@ -2028,16 +1778,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_user() {
-        let conn = Connection::open_in_memory().unwrap();
-        db::init_db(&conn).unwrap();
-
-        // initialize state
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
-        let state = HandlerState {
-            tx,
-            upload_directory: "".to_string(),
-        };
-        tokio::spawn(connection_task(conn, rx));
+        let (db, state) = setup_http_server("");
 
         // initialize app
         // build app

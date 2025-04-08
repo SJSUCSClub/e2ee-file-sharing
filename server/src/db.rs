@@ -3,20 +3,15 @@ use rusqlite::{Connection, Result, params, params_from_iter, types::Value};
 use std::path::Path;
 use std::rc::Rc;
 
-pub struct Database {
-    conn: Connection,
+pub(crate) struct Database {
+    pub(crate) conn: Connection,
 }
 
 impl Database {
     pub fn open<P: AsRef<Path>>(filepath: P) -> Result<Self> {
         let conn = Connection::open(filepath)?;
+        rusqlite::vtab::array::load_module(&conn)?;
         Ok(Database { conn })
-    }
-
-    pub fn open_in_memory() -> Self {
-        Database {
-            conn: Connection::open_in_memory().unwrap(),
-        }
     }
 }
 
@@ -27,7 +22,6 @@ impl Database {
 /// NOTE: will not update an existing table, so in the case of a migration
 /// simply changing the schema within this function will not migrate existing tables
 pub fn init_db(Database { conn }: &mut Database) -> Result<()> {
-    rusqlite::vtab::array::load_module(&conn)?;
     let sql = "
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -300,7 +294,7 @@ pub fn register_user(
 ///
 /// A `Result` containing the group ID if a group exists containing all of
 /// the specified users, or `None` if no group exists.
-pub fn get_group_id(Database { conn }: &Database, members: &Vec<i64>) -> Result<Option<i64>> {
+pub fn get_group_id(Database { conn }: &Database, members: Vec<i64>) -> Result<Option<i64>> {
     // query the database
     let sql = "
     SELECT group_id FROM groups_user_junction
@@ -416,7 +410,8 @@ mod tests {
     use corelib::server::make_salt;
 
     fn setup_test_db() -> Database {
-        let db = setup_test_db();
+        let mut db = Database::open(":memory:").unwrap();
+        init_db(&mut db).unwrap();
 
         // create fake records
         let salt = make_salt();
@@ -659,25 +654,25 @@ mod tests {
         db.conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 2, 'group1', X'00'), (1, 3, 'group1', X'00'), (1, 4, 'group1', X'00'), (2, 1, 'group1', X'00'), (2, 3, 'group1', X'00'), (3, 1, 'group1', X'00'), (3, 4, 'group1', X'00');", []).expect("Failed to insert into groups_user_junction");
 
         // query the big group
-        let result = get_group_id(&db, &vec![1, 2, 3, 4]).unwrap();
+        let result = get_group_id(&db, vec![1, 2, 3, 4]).unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap(), 1);
 
         // query smaller groups
-        let result = get_group_id(&db, &vec![1, 3]).unwrap();
+        let result = get_group_id(&db, vec![1, 3]).unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap(), 2);
-        let result = get_group_id(&db, &vec![1, 4]).unwrap();
+        let result = get_group_id(&db, vec![1, 4]).unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap(), 3);
 
         // and try nonexistent group
-        let result = get_group_id(&db, &vec![2, 4]).unwrap();
+        let result = get_group_id(&db, vec![2, 4]).unwrap();
         assert!(result.is_none());
         // and try with duplicates
-        let result = get_group_id(&db, &vec![1, 2, 3, 1]).unwrap();
+        let result = get_group_id(&db, vec![1, 2, 3, 1]).unwrap();
         assert!(result.is_none());
-        let result = get_group_id(&db, &vec![1, 3, 1]).unwrap();
+        let result = get_group_id(&db, vec![1, 3, 1]).unwrap();
         assert!(result.is_none());
     }
 

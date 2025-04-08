@@ -1,12 +1,12 @@
 mod api;
 mod db;
 
-use std::env;
-
 use api::{HandlerState, connection_task};
 use axum::middleware;
+use std::env;
+use std::sync::Arc;
 
-use rusqlite::Connection;
+use crate::db::Database;
 use utoipa::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
@@ -22,8 +22,8 @@ struct ApiDoc;
 async fn main() {
     // make db
     let db_filename = env::var("DATABASE").unwrap_or("e2ee-file-sharing.db".to_string());
-    let conn = Connection::open(&db_filename).expect("Failed to open db");
-    db::init_db(&conn).expect("Failed to init db");
+    let mut db = Database::open(&db_filename).expect("Failed to open db");
+    db::init_db(&mut db).expect("Failed to init db");
 
     // make upload directory if necessary
     let upload_directory = env::var("UPLOAD_DIRECTORY").unwrap_or("/tmp/e2ee-fs".to_string());
@@ -34,8 +34,11 @@ async fn main() {
     let state = HandlerState {
         tx,
         upload_directory,
+        new_db: Arc::new(Box::new(move || {
+            Database::open(&db_filename).expect("Failed to open database")
+        })),
     };
-    let _ = tokio::spawn(connection_task(conn, rx));
+    let _ = tokio::spawn(connection_task(db, rx));
 
     // make app
     // but in two parts, one for endpoints requiring auth
