@@ -1,8 +1,19 @@
-pub const DB_NAME: &str = "e2ee-file-sharing.db";
-use std::rc::Rc;
-
 use corelib::server::salt_password;
 use rusqlite::{Connection, Result, params, params_from_iter, types::Value};
+use std::path::Path;
+use std::rc::Rc;
+
+pub(crate) struct Database {
+    pub(crate) conn: Connection,
+}
+
+impl Database {
+    pub fn open<P: AsRef<Path>>(filepath: P) -> Result<Self> {
+        let conn = Connection::open(filepath)?;
+        rusqlite::vtab::array::load_module(&conn)?;
+        Ok(Database { conn })
+    }
+}
 
 /// initialize all expected tables within a database connection
 ///
@@ -10,8 +21,7 @@ use rusqlite::{Connection, Result, params, params_from_iter, types::Value};
 ///
 /// NOTE: will not update an existing table, so in the case of a migration
 /// simply changing the schema within this function will not migrate existing tables
-pub fn init_db(conn: &Connection) -> Result<()> {
-    rusqlite::vtab::array::load_module(&conn)?;
+pub fn init_db(Database { conn }: &mut Database) -> Result<()> {
     let sql = "
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -54,7 +64,7 @@ pub fn init_db(conn: &Connection) -> Result<()> {
 /// - `String`: The group name to which the file belongs.
 /// - `i64`: The group ID.
 pub fn get_files_for_user_id(
-    conn: &Connection,
+    Database { conn }: &Database,
     user_id: i64,
 ) -> Result<Vec<(String, i64, String, i64)>> {
     let query = "
@@ -91,7 +101,7 @@ pub fn get_files_for_user_id(
 ///
 /// A `Result` containing a tuple of the filename, group name, and group ID.
 pub fn get_file_info(
-    conn: &Connection,
+    Database { conn }: &Database,
     user_id: i64,
     file_id: i64,
 ) -> Result<(String, String, i64)> {
@@ -128,7 +138,11 @@ pub fn get_file_info(
 ///
 /// A `Result` containing the user ID as an `i64` if the user is found, or an
 /// error if the user cannot be authenticated.
-pub fn get_user_id(conn: &Connection, user_email: &str, user_password_hash: &[u8]) -> Result<i64> {
+pub fn get_user_id(
+    Database { conn }: &Database,
+    user_email: &str,
+    user_password_hash: &[u8],
+) -> Result<i64> {
     // first, fetch the salt
     let query = "
         SELECT salt FROM users WHERE email = ?;
@@ -156,7 +170,7 @@ pub fn get_user_id(conn: &Connection, user_email: &str, user_password_hash: &[u8
 /// # Returns
 ///
 /// A `Result` containing the ID of the newly inserted file.
-pub fn insert_file(conn: &Connection, group_id: i64, filename: &str) -> Result<i64> {
+pub fn insert_file(Database { conn }: &mut Database, group_id: i64, filename: &str) -> Result<i64> {
     let sql = "
         INSERT INTO files (group_id, filename) VALUES (?, ?)
         RETURNING file_id;
@@ -175,7 +189,7 @@ pub fn insert_file(conn: &Connection, group_id: i64, filename: &str) -> Result<i
 /// # Returns
 ///
 /// A `Result` containing a vector of tuples, where each tuple contains the email and user ID of a user in the group.
-pub fn get_group(conn: &Connection, group_id: i64) -> Result<Vec<(String, i64)>> {
+pub fn get_group(Database { conn }: &Database, group_id: i64) -> Result<Vec<(String, i64)>> {
     let sql = "
         SELECT email, id FROM users u LEFT JOIN groups_user_junction g ON u.id = g.user_id WHERE g.group_id = ?;
     ";
@@ -197,7 +211,7 @@ pub fn get_group(conn: &Connection, group_id: i64) -> Result<Vec<(String, i64)>>
 /// # Returns
 ///
 /// A `Result` containing the encrypted key as a `Vec<u8>`.
-pub fn get_group_key(conn: &Connection, group_id: i64, user_id: i64) -> Result<Vec<u8>> {
+pub fn get_group_key(Database { conn }: &Database, group_id: i64, user_id: i64) -> Result<Vec<u8>> {
     let sql = "
         SELECT encrypted_key FROM groups_user_junction WHERE group_id = ? AND user_id = ?;
     ";
@@ -216,7 +230,7 @@ pub fn get_group_key(conn: &Connection, group_id: i64, user_id: i64) -> Result<V
 /// A `Result` containing a vector of tuples, where each tuple contains the user ID and email of a user
 /// that exists in the database.
 pub fn get_existing_users(
-    conn: &Connection,
+    Database { conn }: &Database,
     users: Vec<(i64, String)>,
 ) -> Result<Vec<(i64, String)>> {
     // use a repeated statement because we can't use rarray
@@ -251,7 +265,7 @@ pub fn get_existing_users(
 ///
 /// A `Result` containing the ID of the newly created user
 pub fn register_user(
-    conn: &Connection,
+    Database { conn }: &Database,
     user_email: &str,
     user_password_hash: Vec<u8>,
     salt: [u8; 8],
@@ -280,7 +294,7 @@ pub fn register_user(
 ///
 /// A `Result` containing the group ID if a group exists containing all of
 /// the specified users, or `None` if no group exists.
-pub fn get_group_id(conn: &Connection, members: &Vec<i64>) -> Result<Option<i64>> {
+pub fn get_group_id(Database { conn }: &Database, members: Vec<i64>) -> Result<Option<i64>> {
     // query the database
     let sql = "
     SELECT group_id FROM groups_user_junction
@@ -317,7 +331,7 @@ pub fn get_group_id(conn: &Connection, members: &Vec<i64>) -> Result<Option<i64>
 /// # Returns
 ///
 /// A `Result` containing the ID of the newly created group.
-pub fn create_group(conn: &Connection, members: Vec<(i64, Vec<u8>)>) -> Result<i64> {
+pub fn create_group(Database { conn }: &mut Database, members: Vec<(i64, Vec<u8>)>) -> Result<i64> {
     // insert group
     let sql = "
         INSERT INTO groups VALUES (NULL) RETURNING id;
@@ -358,7 +372,10 @@ pub fn create_group(conn: &Connection, members: Vec<(i64, Vec<u8>)>) -> Result<i
 /// # Returns
 ///
 /// A `Result` containing a vector of tuples, where each tuple contains the group ID and name.
-pub fn get_groups_for_user_id(conn: &Connection, user_id: i64) -> Result<Vec<(i64, String)>> {
+pub fn get_groups_for_user_id(
+    Database { conn }: &Database,
+    user_id: i64,
+) -> Result<Vec<(i64, String)>> {
     let sql = "
         SELECT group_id, name FROM groups_user_junction WHERE user_id = ?;
     ";
@@ -378,7 +395,7 @@ pub fn get_groups_for_user_id(conn: &Connection, user_id: i64) -> Result<Vec<(i6
 /// # Returns
 ///
 /// A `Result` containing the user's public key, in bytes
-pub fn get_user_key(conn: &Connection, user_id: i64) -> Result<Vec<u8>> {
+pub fn get_user_key(Database { conn }: &Database, user_id: i64) -> Result<Vec<u8>> {
     let sql = "
         SELECT pk_pub FROM users WHERE id = ?;
     ";
@@ -391,43 +408,46 @@ pub fn get_user_key(conn: &Connection, user_id: i64) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use corelib::server::make_salt;
-    use rusqlite::Connection;
 
-    fn setup_test_db(conn: &Connection) {
-        init_db(&conn).unwrap();
+    fn setup_test_db() -> Database {
+        let mut db = Database::open(":memory:").unwrap();
+        init_db(&mut db).unwrap();
 
         // create fake records
         let salt = make_salt();
         let password_hash = salt_password(b"00", &salt);
-        conn.execute(
+        db.conn.execute(
             "INSERT INTO users (email, salt, password_hash, pk_pub) VALUES ('test@test.com', ?, ?, X'00');",
             params![salt, password_hash],
         )
         .expect("Failed to insert user");
 
-        conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
+        db.conn
+            .execute("INSERT INTO groups (id) VALUES (NULL);", [])
             .expect("Failed to insert group");
 
-        conn.execute(
+        db.conn.execute(
             "INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 1, 'group_name', X'00');",
             [],
         )
         .expect("Failed to insert group user junction");
 
-        conn.execute(
-            "INSERT INTO files (group_id, filename) VALUES (1, 'test_file.txt');",
-            [],
-        )
-        .expect("Failed to insert file");
+        db.conn
+            .execute(
+                "INSERT INTO files (group_id, filename) VALUES (1, 'test_file.txt');",
+                [],
+            )
+            .expect("Failed to insert file");
+
+        db
     }
 
     #[test]
     fn test_get_files_for_user() {
-        let conn = Connection::open_in_memory().unwrap();
-        setup_test_db(&conn);
+        let db = setup_test_db();
 
         let user_id = 1;
-        let result = get_files_for_user_id(&conn, user_id).unwrap();
+        let result = get_files_for_user_id(&db, user_id).unwrap();
 
         assert_eq!(
             result,
@@ -437,128 +457,122 @@ mod tests {
 
     #[test]
     fn test_get_files_for_nonexisting_user() {
-        let conn = Connection::open_in_memory().unwrap();
-        setup_test_db(&conn);
+        let db = setup_test_db();
 
         let user_id = 1000; // does not exist in the testing db
-        let result = get_files_for_user_id(&conn, user_id).unwrap();
+        let result = get_files_for_user_id(&db, user_id).unwrap();
 
         assert_eq!(result, Vec::<(String, i64, String, i64)>::new());
     }
 
     #[test]
     fn test_get_user_id_existing() {
-        let conn = Connection::open_in_memory().unwrap();
-        setup_test_db(&conn);
+        let db = setup_test_db();
 
         // get user id for 'test'
-        let result = get_user_id(&conn, "test@test.com", b"00").unwrap();
+        let result = get_user_id(&db, "test@test.com", b"00").unwrap();
         assert_eq!(result, 1);
 
         // try with another
         let salt = make_salt();
         let password_hash = salt_password(b"AFF3", &salt);
-        conn.execute(
+        db.conn.execute(
             "INSERT INTO users(email, password_hash, salt, pk_pub) VALUES ('test2@test2.com', ?, ?, X'00');",
             params![password_hash, salt],
         )
         .expect("Failed to execute insert");
-        let result2 = get_user_id(&conn, "test2@test2.com", b"AFF3").unwrap();
+        let result2 = get_user_id(&db, "test2@test2.com", b"AFF3").unwrap();
         assert_eq!(result2, 2);
     }
     #[test]
     fn test_get_user_id_mismatch_hash() {
-        let conn = Connection::open_in_memory().unwrap();
-        setup_test_db(&conn);
+        let db = setup_test_db();
 
         // get user id for nonexistent person
-        assert!(get_user_id(&conn, "test@test.com", b"01").is_err());
+        assert!(get_user_id(&db, "test@test.com", b"01").is_err());
     }
     #[test]
     fn test_get_user_id_mismatch_email() {
-        let conn = Connection::open_in_memory().unwrap();
-        setup_test_db(&conn);
+        let db = setup_test_db();
 
         // get user id for nonexistent person
-        assert!(get_user_id(&conn, "nest@test.com", b"00").is_err());
+        assert!(get_user_id(&db, "nest@test.com", b"00").is_err());
     }
     #[test]
     fn test_insert_file() {
-        let conn = Connection::open_in_memory().unwrap();
-        setup_test_db(&conn);
+        let mut db = setup_test_db();
 
-        let file_id = insert_file(&conn, 1, "test_file.txt").unwrap();
+        let file_id = insert_file(&mut db, 1, "test_file.txt").unwrap();
         assert_eq!(file_id, 2);
         // should work with similar group id / filename since fileid is primary key
-        let file_id = insert_file(&conn, 1, "test_file.txt").unwrap();
+        let file_id = insert_file(&mut db, 1, "test_file.txt").unwrap();
         assert_eq!(file_id, 3);
         // and also with others
-        let file_id = insert_file(&conn, 1, "test_file2.txt").unwrap();
+        let file_id = insert_file(&mut db, 1, "test_file2.txt").unwrap();
         assert_eq!(file_id, 4);
     }
     #[test]
     fn test_insert_file_nonexistent_group_id() {
-        let conn = Connection::open_in_memory().unwrap();
-        setup_test_db(&conn);
+        let mut db = setup_test_db();
 
-        assert!(insert_file(&conn, 2, "test_file.txt").is_err());
+        assert!(insert_file(&mut db, 2, "test_file.txt").is_err());
     }
     #[test]
     fn test_get_file_info() {
-        let conn = Connection::open_in_memory().unwrap();
-        setup_test_db(&conn);
+        let db = setup_test_db();
 
-        let result = get_file_info(&conn, 1, 1).unwrap();
+        let result = get_file_info(&db, 1, 1).unwrap();
         assert_eq!(
             result,
             ("test_file.txt".to_string(), "group_name".to_string(), 1)
         );
 
         // and try with a new one
-        conn.execute(
-            "INSERT INTO files (group_id, filename) VALUES (1, 'test_file2.txt');",
-            [],
-        )
-        .expect("Failed to insert file");
-        let result = get_file_info(&conn, 1, 2).unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO files (group_id, filename) VALUES (1, 'test_file2.txt');",
+                [],
+            )
+            .expect("Failed to insert file");
+        let result = get_file_info(&db, 1, 2).unwrap();
         assert_eq!(
             result,
             ("test_file2.txt".to_string(), "group_name".to_string(), 1)
         );
 
         // try getting file info for a file that isn't shared with me
-        conn.execute_batch("
+        db.conn.execute_batch("
             INSERT INTO groups (id) VALUES (NULL);
             INSERT INTO users (email, salt, password_hash, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00');
             INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (2, 2, 'second', X'00');
             INSERT INTO files (group_id, filename) VALUES (2, 'privatefile');
         ").expect("Failed to insert items");
         // user 2 should be able to get it
-        let result = get_file_info(&conn, 2, 3).unwrap();
+        let result = get_file_info(&db, 2, 3).unwrap();
         assert_eq!(result, ("privatefile".to_string(), "second".to_string(), 2));
         // and user 1 shouldn't
-        let result = get_file_info(&conn, 1, 3);
+        let result = get_file_info(&db, 1, 3);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_get_group() {
-        let conn = Connection::open_in_memory().unwrap();
-        setup_test_db(&conn);
+        let db = setup_test_db();
 
         // query current database
-        let result = get_group(&conn, 1);
+        let result = get_group(&db, 1);
         let result = result.unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, "test@test.com");
         assert_eq!(result[0].1, 1);
 
         // and try with a new group too
-        conn.execute("INSERT INTO users (email, salt, password_hash, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00'), ('test4@test.com', X'00', X'00', X'00');", []).expect("Failed to execute insert");
-        conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
+        db.conn.execute("INSERT INTO users (email, salt, password_hash, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00'), ('test4@test.com', X'00', X'00', X'00');", []).expect("Failed to execute insert");
+        db.conn
+            .execute("INSERT INTO groups (id) VALUES (NULL);", [])
             .expect("Failed to execute insert");
-        conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (2, 2, 'group_name', X'00'), (2, 3, 'group_name', X'00'), (2, 4, 'group_name', X'00');", []).expect("Failed to insert into groups_user_junction");
-        let result = get_group(&conn, 2);
+        db.conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (2, 2, 'group_name', X'00'), (2, 3, 'group_name', X'00'), (2, 4, 'group_name', X'00');", []).expect("Failed to insert into groups_user_junction");
+        let result = get_group(&db, 2);
         assert!(result.is_ok());
         let result = result.unwrap();
         assert_eq!(result.len(), 3);
@@ -572,33 +586,32 @@ mod tests {
 
     #[test]
     fn test_get_group_key() {
-        let conn = Connection::open_in_memory().unwrap();
-        setup_test_db(&conn);
-        conn.execute("INSERT INTO users (email, salt, password_hash, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00');", []).expect("Failed to insert");
-        conn.execute("INSERT INTO groups (id) VALUES (NULL);", [])
+        let db = setup_test_db();
+        db.conn.execute("INSERT INTO users (email, salt, password_hash, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00');", []).expect("Failed to insert");
+        db.conn
+            .execute("INSERT INTO groups (id) VALUES (NULL);", [])
             .expect("Failed to insert");
-        conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 2, 'group_name', X'01'), (2, 1, 'group_name', X'02'), (2, 2, 'group_name', X'03');", []).expect("Failed to insert");
+        db.conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 2, 'group_name', X'01'), (2, 1, 'group_name', X'02'), (2, 2, 'group_name', X'03');", []).expect("Failed to insert");
 
         // should allow different keys for different (user, group) pairs
-        let result = get_group_key(&conn, 1, 1).unwrap();
+        let result = get_group_key(&db, 1, 1).unwrap();
         assert_eq!(result, vec![0u8]);
-        let result = get_group_key(&conn, 1, 2).unwrap();
+        let result = get_group_key(&db, 1, 2).unwrap();
         assert_eq!(result, vec![1u8]);
-        let result = get_group_key(&conn, 2, 1).unwrap();
+        let result = get_group_key(&db, 2, 1).unwrap();
         assert_eq!(result, vec![2u8]);
-        let result = get_group_key(&conn, 2, 2).unwrap();
+        let result = get_group_key(&db, 2, 2).unwrap();
         assert_eq!(result, vec![3u8]);
     }
 
     #[test]
     fn test_get_existing_users() {
-        let conn = Connection::open_in_memory().unwrap();
-        setup_test_db(&conn);
-        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00'), ('test4@test.com', X'00', X'00', X'00');", []).expect("Failed to insert into users");
+        let db = setup_test_db();
+        db.conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00'), ('test4@test.com', X'00', X'00', X'00');", []).expect("Failed to insert into users");
 
         // test with id/email mismatch
         let result = get_existing_users(
-            &conn,
+            &db,
             vec![
                 (1, "test2@test.com".to_string()),
                 (2, "test3@test.com".to_string()),
@@ -610,7 +623,7 @@ mod tests {
 
         // test with proper id/email pairs
         let result = get_existing_users(
-            &conn,
+            &db,
             vec![
                 (2, "test2@test.com".to_string()),
                 (3, "test3@test.com".to_string()),
@@ -630,48 +643,49 @@ mod tests {
 
     #[test]
     fn test_get_group_id() {
-        let conn = Connection::open_in_memory().unwrap();
-        setup_test_db(&conn);
-        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00'), ('test4@test.com', X'00', X'00', X'00');", []).expect("Failed to insert into users");
-        conn.execute("INSERT INTO groups VALUES (NULL);", [])
+        let db = setup_test_db();
+        db.conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00'), ('test4@test.com', X'00', X'00', X'00');", []).expect("Failed to insert into users");
+        db.conn
+            .execute("INSERT INTO groups VALUES (NULL);", [])
             .expect("Failed to insert into groups");
-        conn.execute("INSERT INTO groups VALUES (NULL);", [])
+        db.conn
+            .execute("INSERT INTO groups VALUES (NULL);", [])
             .expect("Failed to insert into groups");
-        conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 2, 'group1', X'00'), (1, 3, 'group1', X'00'), (1, 4, 'group1', X'00'), (2, 1, 'group1', X'00'), (2, 3, 'group1', X'00'), (3, 1, 'group1', X'00'), (3, 4, 'group1', X'00');", []).expect("Failed to insert into groups_user_junction");
+        db.conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 2, 'group1', X'00'), (1, 3, 'group1', X'00'), (1, 4, 'group1', X'00'), (2, 1, 'group1', X'00'), (2, 3, 'group1', X'00'), (3, 1, 'group1', X'00'), (3, 4, 'group1', X'00');", []).expect("Failed to insert into groups_user_junction");
 
         // query the big group
-        let result = get_group_id(&conn, &vec![1, 2, 3, 4]).unwrap();
+        let result = get_group_id(&db, vec![1, 2, 3, 4]).unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap(), 1);
 
         // query smaller groups
-        let result = get_group_id(&conn, &vec![1, 3]).unwrap();
+        let result = get_group_id(&db, vec![1, 3]).unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap(), 2);
-        let result = get_group_id(&conn, &vec![1, 4]).unwrap();
+        let result = get_group_id(&db, vec![1, 4]).unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap(), 3);
 
         // and try nonexistent group
-        let result = get_group_id(&conn, &vec![2, 4]).unwrap();
+        let result = get_group_id(&db, vec![2, 4]).unwrap();
         assert!(result.is_none());
         // and try with duplicates
-        let result = get_group_id(&conn, &vec![1, 2, 3, 1]).unwrap();
+        let result = get_group_id(&db, vec![1, 2, 3, 1]).unwrap();
         assert!(result.is_none());
-        let result = get_group_id(&conn, &vec![1, 3, 1]).unwrap();
+        let result = get_group_id(&db, vec![1, 3, 1]).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn test_create_group() {
-        let conn = Connection::open_in_memory().unwrap();
-        setup_test_db(&conn);
-        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00'), ('test4@test.com', X'00', X'00', X'00');", []).expect("Failed to insert into users");
+        let mut db = setup_test_db();
+        db.conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00'), ('test4@test.com', X'00', X'00', X'00');", []).expect("Failed to insert into users");
 
         // create group containing user 1 and user 2
-        let result = create_group(&conn, vec![(1, vec![0u8]), (2, vec![1u8])]).unwrap();
+        let result = create_group(&mut db, vec![(1, vec![0u8]), (2, vec![1u8])]).unwrap();
         assert_eq!(result, 2);
-        let user_key = conn
+        let user_key = db
+            .conn
             .query_row(
                 "SELECT encrypted_key FROM groups_user_junction WHERE group_id = 2 AND user_id = 1",
                 [],
@@ -679,7 +693,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(user_key, vec![0u8]);
-        let user_key = conn
+        let user_key = db
+            .conn
             .query_row(
                 "SELECT encrypted_key FROM groups_user_junction WHERE group_id = 2 AND user_id = 2",
                 [],
@@ -691,18 +706,20 @@ mod tests {
 
     #[test]
     fn test_get_groups_for_user_id() {
-        let conn = Connection::open_in_memory().unwrap();
-        setup_test_db(&conn);
+        let db = setup_test_db();
 
-        conn.execute("INSERT INTO groups VALUES (NULL);", [])
+        db.conn
+            .execute("INSERT INTO groups VALUES (NULL);", [])
             .unwrap();
-        conn.execute("INSERT INTO groups VALUES (NULL);", [])
+        db.conn
+            .execute("INSERT INTO groups VALUES (NULL);", [])
             .unwrap();
-        conn.execute("INSERT INTO groups VALUES (NULL);", [])
+        db.conn
+            .execute("INSERT INTO groups VALUES (NULL);", [])
             .unwrap();
-        conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (2, 1, 'group2', X'00'), (3, 1, 'group3', X'00'), (4, 1, 'group4', X'00');", []).unwrap();
+        db.conn.execute("INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (2, 1, 'group2', X'00'), (3, 1, 'group3', X'00'), (4, 1, 'group4', X'00');", []).unwrap();
 
-        let result = get_groups_for_user_id(&conn, 1).unwrap();
+        let result = get_groups_for_user_id(&db, 1).unwrap();
         assert_eq!(
             result,
             vec![
@@ -714,37 +731,36 @@ mod tests {
         );
 
         // test nonexistent
-        let result = get_groups_for_user_id(&conn, 2).unwrap();
+        let result = get_groups_for_user_id(&db, 2).unwrap();
         assert_eq!(result, vec![]);
     }
 
     #[test]
     fn test_get_user_key() {
-        let conn = Connection::open_in_memory().unwrap();
-        setup_test_db(&conn);
+        let db = setup_test_db();
 
         let pk_pub = vec![22u8]; // add a second user
-        conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', X'02', X'01', ?);", [pk_pub.clone()]).unwrap();
+        db.conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', X'02', X'01', ?);", [pk_pub.clone()]).unwrap();
 
-        let result = get_user_key(&conn, 1).unwrap();
+        let result = get_user_key(&db, 1).unwrap();
         assert_eq!(result, [0u8]); // the one from setup_test_db
-        let result = get_user_key(&conn, 2).unwrap();
+        let result = get_user_key(&db, 2).unwrap();
         assert_eq!(result, pk_pub);
     }
 
     #[test]
     fn test_register_user() {
-        let conn = Connection::open_in_memory().unwrap();
-        setup_test_db(&conn);
+        let db = setup_test_db();
 
         let salt: [u8; 8] = [0; 8];
         let password_hash = b"PASSWORD".to_vec();
         let pwd = password_hash.clone();
 
         let result =
-            register_user(&conn, &"email@domain.com", password_hash, salt, vec![22u8]).unwrap();
+            register_user(&db, &"email@domain.com", password_hash, salt, vec![22u8]).unwrap();
 
-        let uid: i64 = conn
+        let uid: i64 = db
+            .conn
             .query_row(
                 "SELECT id FROM users WHERE email = ? AND password_hash = ?;",
                 params![&"email@domain.com", pwd],
