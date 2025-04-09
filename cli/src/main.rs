@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use cli::{download, get_user_info, register, upload};
+use cli::{download, get_user_info, list_files, register, upload};
 use rpassword::read_password;
 use std::{
     env, fs,
@@ -27,6 +27,8 @@ struct Cli {
 enum Subcommands {
     /// Register a new account with the provided email and password credentials.
     Register {},
+    /// List all files associated with this account
+    List {},
     /// Download and decrypt a file from the server
     Download {
         /// The ID of the file to download
@@ -154,6 +156,21 @@ fn main() {
                 Err(e) => println!("Failed to upload file: {e}"),
             }
         }
+        Subcommands::List {} => match list_files(SERVER_URL, &args.email, &encoded_password) {
+            Ok(file_infos) => {
+                println!("{:<20} {:<10} {:<15} {:<10}", "file_name", "file_id", "group_name", "group_id");
+                println!("{}", "-".repeat(60));
+
+                // Print each file info
+                for file in file_infos.files {
+                    println!(
+                        "{:<20} {:<10} {:<15} {:<10}",
+                        file.file_name, file.file_id, file.group_name, file.group_id
+                    );
+                }
+            }
+            Err(e) => println!("Failed to list files: {e}"),
+        },
         Subcommands::Register {} => unreachable!(),
     }
 }
