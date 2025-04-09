@@ -89,10 +89,7 @@ async fn main() {
 
     // start server
     let bind_addr = std::env::var("EFS_SERVER_LISTEN").unwrap_or("127.0.0.1:8000".to_string());
-    println!(
-        "[INFO] server starting on port {}",
-        bind_addr
-    );
+    println!("[INFO] server starting on port {}", bind_addr);
     let listener = tokio::net::TcpListener::bind(bind_addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
