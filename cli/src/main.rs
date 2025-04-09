@@ -158,7 +158,10 @@ fn main() {
         }
         Subcommands::List {} => match list_files(SERVER_URL, &args.email, &encoded_password) {
             Ok(file_infos) => {
-                println!("{:<20} {:<10} {:<15} {:<10}", "file_name", "file_id", "group_name", "group_id");
+                println!(
+                    "{:<20} {:<10} {:<15} {:<10}",
+                    "file_name", "file_id", "group_name", "group_id"
+                );
                 println!("{}", "-".repeat(60));
 
                 // Print each file info
