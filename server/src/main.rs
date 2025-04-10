@@ -2,7 +2,9 @@ mod api;
 mod db;
 
 use api::{HandlerState, connection_task};
-use axum::{http::Request, middleware, response::Response};
+use axum::middleware;
+use tower_http::trace::TraceLayer;
+use tracing::Level;
 use std::env;
 use std::sync::Arc;
 
@@ -17,18 +19,6 @@ use utoipa_axum::{router::OpenApiRouter, routes};
     version = "0.1.0",
 ))]
 struct ApiDoc;
-
-async fn log_requests(req: Request<axum::body::Body>, next: middleware::Next) -> Response {
-    let method = req.method().clone();
-    let path = req.uri().path().to_owned();
-
-    let response = next.run(req).await;
-
-    let status = response.status();
-    println!("[INFO] {} {} => {}", method, path, status);
-
-    response
-}
 
 #[tokio::main]
 async fn main() {
@@ -85,11 +75,18 @@ async fn main() {
         utoipa_swagger_ui::SwaggerUi::new("/swagger-ui").url("/api/v1/openapi.json", openapi),
     );
 
-    let app = app.route_layer(middleware::from_fn(log_requests));
+    tracing_subscriber::fmt()
+        .init();
+
+    let app = app.layer(
+        TraceLayer::new_for_http()
+            .make_span_with(tower_http::trace::DefaultMakeSpan::new().level(Level::INFO))
+            .on_response(tower_http::trace::DefaultOnResponse::new().level(Level::INFO))
+    );
 
     // start server
     let bind_addr = std::env::var("EFS_SERVER_LISTEN").unwrap_or("127.0.0.1:8091".to_string());
-    println!("[INFO] server starting on port {}", bind_addr);
+    println!("server starting on port {}", bind_addr);
     let listener = tokio::net::TcpListener::bind(bind_addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
