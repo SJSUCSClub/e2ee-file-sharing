@@ -469,3 +469,38 @@ pub fn upload(
     let result: FileId = resp.json()?;
     Ok(result.file_id)
 }
+
+/// retrieves a list of all files from the server
+///
+/// # Arguments
+///
+/// * `server_url` - the url of the server
+/// * `email` - the email of the user
+/// * `encoded_password` - the base64-encoded password of the user
+///
+/// # Returns
+///
+/// * `file_info` - vector of all the file infos
+pub fn list_files(
+    server_url: &str,
+    email: &str,
+    encoded_password: &str,
+) -> Result<FileInfos, Box<dyn Error>> {
+    let client = reqwest::blocking::Client::new();
+    let resp = client
+        .get(format!(
+            "{server_url}/api/v1/list-files?user_email={email}&user_password_hash={encoded_password}",
+        ))
+        .send()?;
+
+    if !resp.status().is_success() {
+        return Err(Box::from(format!(
+            "Server responded to user info request with:\nStatus: {}\nResponse: {}",
+            resp.status(),
+            resp.text()?
+        )));
+    }
+
+    let files: FileInfos = resp.json()?;
+    Ok(files)
+}
