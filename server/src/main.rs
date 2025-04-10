@@ -3,10 +3,10 @@ mod db;
 
 use api::{HandlerState, connection_task};
 use axum::middleware;
-use tower_http::trace::TraceLayer;
-use tracing::Level;
 use std::env;
 use std::sync::Arc;
+use tower_http::trace::TraceLayer;
+use tracing::Level;
 
 use crate::db::Database;
 use utoipa::OpenApi;
@@ -75,13 +75,12 @@ async fn main() {
         utoipa_swagger_ui::SwaggerUi::new("/swagger-ui").url("/api/v1/openapi.json", openapi),
     );
 
-    tracing_subscriber::fmt()
-        .init();
+    tracing_subscriber::fmt().init();
 
     let app = app.layer(
         TraceLayer::new_for_http()
             .make_span_with(tower_http::trace::DefaultMakeSpan::new().level(Level::INFO))
-            .on_response(tower_http::trace::DefaultOnResponse::new().level(Level::INFO))
+            .on_response(tower_http::trace::DefaultOnResponse::new().level(Level::INFO)),
     );
 
     // start server
