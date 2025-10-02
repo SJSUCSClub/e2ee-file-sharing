@@ -500,14 +500,14 @@ pub(crate) async fn register_user(
 
     // then, salt and hash the password
     let salt = make_salt();
-    let hashed_password2: Vec<u8> = salt_password(password_bytes.as_slice(), &salt);
+    let hashed_password2 = salt_password(password_bytes.as_slice(), &salt);
 
     // send request to writing db thread
     let (tx, rx) = oneshot::channel();
     st.tx
         .send(DatabaseCommand::RegisterUser {
             user_email: params.user_email,
-            user_password_hash: hashed_password2,
+            user_password_hash: hashed_password2.to_vec(),
             salt,
             pub_key: key_bytes,
             responder: tx,

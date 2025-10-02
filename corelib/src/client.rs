@@ -1,20 +1,16 @@
-use aes_gcm::{
-    Aes256Gcm, Key,
-    aead::{Aead, AeadCore, AeadInPlace, KeyInit},
-};
 use argon2::{Algorithm, Argon2, Params, Version};
-use rand::rngs::OsRng;
-use rsa::pkcs8::{DecodePublicKey, EncodePublicKey, LineEnding, spki};
-use rsa::{
-    Pkcs1v15Encrypt,
-    pkcs8::{DecodePrivateKey, EncodePrivateKey},
+use aws_lc_rs::aead::{AES_256_GCM, Aad, NONCE_LEN, Nonce, RandomizedNonceKey};
+use aws_lc_rs::cipher::AES_256_KEY_LEN;
+use aws_lc_rs::encoding::{AsDer, Pkcs8V1Der, PublicKeyX509Der};
+use aws_lc_rs::rsa::{
+    KeySize, OAEP_SHA256_MGF1SHA256, OaepPrivateDecryptingKey, OaepPublicEncryptingKey,
+    PrivateDecryptingKey, PublicEncryptingKey,
 };
-use rsa::{RsaPrivateKey, RsaPublicKey, pkcs8};
+use aws_lc_rs::{digest, rand};
+use base64::prelude::*;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256, digest::generic_array::GenericArray};
 
-/// AES-256 key size in bytes. Same as [Aes256Gcm::key_size].
-const PERSONAL_KEY_LEN: usize = 32;
+const PERSONAL_KEY_LEN: usize = AES_256_KEY_LEN;
 
 #[derive(Clone)]
 pub struct PersonalKey {
@@ -65,24 +61,10 @@ impl PersonalKey {
     ///
     /// The hash of the personal key, as bytes
     pub fn hash(self: &Self) -> [u8; 32] {
-        let mut hasher = Sha256::new();
-        hasher.update(self.key);
-        hasher.finalize().into()
-    }
-
-    /// Returns the AES-256 key as a `Key<Aes256Gcm>`.
-    ///
-    /// # Returns
-    ///
-    /// The AES-256 key
-    pub fn as_aes256gcm_key(self: &Self) -> &Key<Aes256Gcm> {
-        Key::<Aes256Gcm>::from_slice(self.key.as_slice())
-    }
-}
-
-impl Into<Key<Aes256Gcm>> for PersonalKey {
-    fn into(self) -> Key<Aes256Gcm> {
-        Key::<Aes256Gcm>::from(self.key)
+        let d = digest::digest(&digest::SHA256, &self.key);
+        let mut res: [u8; 32] = [0; 32];
+        res.copy_from_slice(d.as_ref());
+        res
     }
 }
 
@@ -90,12 +72,9 @@ impl Into<Key<Aes256Gcm>> for PersonalKey {
 pub struct PkKeyPair {
     // PkPub - RSA
     // PkPriv - RSA
-    pkpub: RsaPublicKey,
-    pkpriv: RsaPrivateKey,
+    pkpub: PublicEncryptingKey,
+    pkpriv: PrivateDecryptingKey,
 }
-
-/// OpenSSH default length as of 2025.
-const RSA_BITS: usize = 3072;
 
 impl PkKeyPair {
     /// Creates a new PkKeyPair.
@@ -105,23 +84,13 @@ impl PkKeyPair {
     /// A new PkKeyPair
     pub fn new() -> Self {
         // generates pkpub and pkpriv
-        let mut rng = rand::thread_rng();
-        let priv_key = RsaPrivateKey::new(&mut rng, RSA_BITS).expect("failed to generate a key");
-        let pub_key = RsaPublicKey::from(&priv_key);
+        let priv_key =
+            PrivateDecryptingKey::generate(KeySize::Rsa2048).expect("failed to generate a key");
         PkKeyPair {
-            pkpub: pub_key,
+            pkpub: priv_key.public_key(),
+            // Fuck AWS for writing a Result<> when it's completely unnecessary
             pkpriv: priv_key,
         }
-    }
-
-    /// Convert the public key to PEM
-    /// This is needed to then serialize the Public Key in order to send to the server
-    ///
-    /// # Returns
-    ///
-    /// A Result containing the PEM as a String, or an Error
-    pub fn get_public_key_pem(&self) -> Result<String, spki::Error> {
-        EncodePublicKey::to_public_key_pem(&self.pkpub, LineEnding::LF)
     }
 
     /// Decrypts a group key with the private key of the user.
@@ -135,11 +104,18 @@ impl PkKeyPair {
     /// The decrypted group key
     pub fn get_group_key(&self, group_key_encrypted: &[u8]) -> GroupKey {
         // decrypt the encrypted group key with the private key
+        let pkpriv = OaepPrivateDecryptingKey::new(self.pkpriv.clone()).unwrap();
+        let mut plaintext = vec![0u8; pkpriv.min_output_size()];
+        let plaintext = pkpriv
+            .decrypt(
+                &OAEP_SHA256_MGF1SHA256,
+                group_key_encrypted,
+                &mut plaintext,
+                None,
+            )
+            .expect("Failed to decrypt key");
         GroupKey {
-            key: self
-                .pkpriv
-                .decrypt(Pkcs1v15Encrypt, group_key_encrypted)
-                .expect("Failed to decrypt key"),
+            key: plaintext.try_into().unwrap(),
         }
     }
 }
@@ -147,9 +123,40 @@ impl PkKeyPair {
 /// On-disk storage format.
 #[derive(Serialize, Deserialize)]
 pub struct DiskKeys {
-    nonce: Vec<u8>,        // 12 bytes
-    pk_pub: String,        // pem
-    pk_priv_prot: Vec<u8>, // pem, encoded with the aes key
+    nonce: [u8; NONCE_LEN], // 12 bytes
+    pk_pub: String,         // base64 encode of DER
+    pk_priv_prot: String,   // base64 encode of ciphertext of DER
+}
+
+fn aead_encrypt(plaintext: &[u8], key: &[u8; AES_256_KEY_LEN]) -> ([u8; NONCE_LEN], Vec<u8>) {
+    let key = RandomizedNonceKey::new(&AES_256_GCM, key).unwrap();
+    let mut ciphertext = Vec::from(plaintext);
+    let nonce = key
+        .seal_in_place_append_tag(Aad::empty(), &mut ciphertext)
+        .unwrap();
+    // Hope compiler will optmize out this copy of an unescaped value (nonce)
+    (nonce.as_ref().clone(), ciphertext)
+}
+
+fn base64_encode(der: &[u8]) -> String {
+    BASE64_STANDARD.encode(der)
+}
+fn base64_decode(pem: &str) -> Vec<u8> {
+    BASE64_STANDARD.decode(pem).unwrap()
+}
+
+fn aead_decrypt(
+    ciphertext: Vec<u8>, // We need a `mut Vec<u8>` anyways, let the caller do a copy if necessary
+    nonce: &[u8; NONCE_LEN],
+    key: &[u8; AES_256_KEY_LEN],
+) -> Vec<u8> {
+    // Give it a more accurate name: both incoming ciphertext, and output plaintext will be stored in this buffer
+    let mut in_out = ciphertext;
+
+    let key = RandomizedNonceKey::new(&AES_256_GCM, key).unwrap();
+    let nonce = Nonce::try_assume_unique_for_key(nonce).unwrap();
+    key.open_in_place(nonce, Aad::empty(), &mut in_out).unwrap();
+    in_out
 }
 
 impl DiskKeys {
@@ -164,26 +171,16 @@ impl DiskKeys {
     ///
     /// A new DiskKeys object
     pub fn new(personal_key: &PersonalKey, kp: &PkKeyPair) -> Self {
-        let encoded_pk_pub =
-            EncodePublicKey::to_public_key_pem(&kp.pkpub, pkcs8::LineEnding::LF).unwrap();
+        let pub_der =
+            AsDer::<PublicKeyX509Der>::as_der(&kp.pkpub).expect("failed to DER public key");
+        let priv_der = AsDer::<Pkcs8V1Der>::as_der(&kp.pkpriv).expect("failed to DER private key");
 
-        // generate pk_priv_prot
-        // by encrypting pkpriv with the aes key and the nonce
-        let cipher = Aes256Gcm::new(personal_key.as_aes256gcm_key());
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
-
-        let mut encoded_pk_priv = EncodePrivateKey::to_pkcs8_pem(&kp.pkpriv, pkcs8::LineEnding::LF)
-            .unwrap()
-            .as_bytes()
-            .to_vec();
-        cipher
-            .encrypt_in_place(&nonce, b"", &mut encoded_pk_priv)
-            .expect("AES-GCM encrypt failed");
+        let (nonce, ciphertext) = aead_encrypt(priv_der.as_ref(), &personal_key.key);
 
         DiskKeys {
-            nonce: nonce.to_vec(),
-            pk_pub: encoded_pk_pub,
-            pk_priv_prot: encoded_pk_priv,
+            nonce,
+            pk_pub: base64_encode(pub_der.as_ref()),
+            pk_priv_prot: base64_encode(ciphertext.as_slice()),
         }
     }
 
@@ -197,17 +194,16 @@ impl DiskKeys {
     ///
     /// The decrypted PkKeyPair
     pub fn to_memory(self, personal_key: &PersonalKey) -> PkKeyPair {
-        let cipher = Aes256Gcm::new(personal_key.as_aes256gcm_key());
-        let nonce = GenericArray::from_slice(self.nonce.as_slice());
-
-        let mut buffer = self.pk_priv_prot;
-        cipher
-            .decrypt_in_place(&nonce, b"", &mut buffer)
-            .expect("Failed to decrypt priv key!");
+        let pk_pub = base64_decode(&self.pk_pub);
+        let pk_priv = aead_decrypt(
+            base64_decode(&self.pk_priv_prot),
+            &self.nonce,
+            &personal_key.key,
+        );
 
         PkKeyPair {
-            pkpub: DecodePublicKey::from_public_key_pem(&self.pk_pub).unwrap(),
-            pkpriv: DecodePrivateKey::from_pkcs8_pem(&String::from_utf8(buffer).unwrap()).unwrap(),
+            pkpub: PublicEncryptingKey::from_der(pk_pub.as_slice()).unwrap(),
+            pkpriv: PrivateDecryptingKey::from_pkcs8(pk_priv.as_slice()).unwrap(),
         }
     }
 }
@@ -215,12 +211,12 @@ impl DiskKeys {
 // In-memory only
 #[derive(PartialEq, Eq, Debug)]
 pub struct GroupKey {
-    key: Vec<u8>,
+    key: [u8; AES_256_KEY_LEN],
 }
 // wifi transport and storage on server disk
 #[derive(Serialize, Deserialize)]
 pub struct EncryptedFile {
-    pub nonce: Vec<u8>,
+    pub nonce: [u8; NONCE_LEN],
     pub bytes: Vec<u8>,
 }
 impl GroupKey {
@@ -235,16 +231,19 @@ impl GroupKey {
     /// # Returns
     ///
     /// A vector of encrypted group keys (as bytes)
-    pub fn make_encrypted_group_keys(public_keys: &[RsaPublicKey]) -> Vec<Vec<u8>> {
-        let group_key = aes_gcm::Aes256Gcm::generate_key(aes_gcm::aead::OsRng);
-        let group_key = group_key.to_vec();
+    pub fn make_encrypted_group_keys(public_keys: &[PublicEncryptingKey]) -> Vec<Vec<u8>> {
+        let mut group_key = [0u8; AES_256_KEY_LEN];
+        rand::fill(&mut group_key).unwrap();
 
-        let mut rng = rand::thread_rng();
         public_keys
             .iter()
             .map(|pk| {
-                pk.encrypt(&mut rng, Pkcs1v15Encrypt, &group_key[..])
-                    .expect("Failed to encrypt group key!")
+                let pkpub = OaepPublicEncryptingKey::new(pk.clone()).unwrap();
+                let mut ciphertext = vec![0u8; pkpub.ciphertext_size()];
+                let ciphertext = pkpub
+                    .encrypt(&OAEP_SHA256_MGF1SHA256, &group_key, &mut ciphertext, None)
+                    .unwrap();
+                ciphertext.to_vec()
             })
             .collect()
     }
@@ -260,13 +259,11 @@ impl GroupKey {
     ///
     /// An EncryptedFile object
     pub fn encrypt_file(&self, bytes: &[u8]) -> EncryptedFile {
-        let cipher =
-            Aes256Gcm::new_from_slice(self.key.as_slice()).expect("Failed to init AES-GCM");
-        let nonce = Aes256Gcm::generate_nonce(OsRng);
-        let bytes = cipher.encrypt(&nonce, bytes).expect("Failed to encrypt");
+        let (nonce, ciphertext) = aead_encrypt(bytes, &self.key);
+
         EncryptedFile {
-            nonce: nonce.to_vec(),
-            bytes,
+            nonce,
+            bytes: ciphertext,
         }
     }
     /// Decrypts a file using the group key and the nonce
@@ -280,12 +277,11 @@ impl GroupKey {
     ///
     /// A vector of decrypted bytes
     pub fn decrypt_file(&self, encrypted_file: &EncryptedFile) -> Vec<u8> {
-        let cipher =
-            Aes256Gcm::new_from_slice(self.key.as_slice()).expect("Failed to init AES-GCM");
-        let nonce = GenericArray::from_slice(encrypted_file.nonce.as_slice());
-        cipher
-            .decrypt(&nonce, encrypted_file.bytes.as_slice())
-            .expect("Failed to decrypt file")
+        aead_decrypt(
+            encrypted_file.bytes.clone(),
+            &encrypted_file.nonce,
+            &self.key,
+        )
     }
 }
 
@@ -303,6 +299,14 @@ mod tests {
         assert_eq!(personal_key.hash(), personal_key_2.hash());
     }
 
+    fn pub_der(a: &PublicEncryptingKey) {
+        AsDer::<PublicKeyX509Der>::as_der(a).unwrap();
+    }
+
+    fn priv_der(a: &PrivateDecryptingKey) {
+        AsDer::<Pkcs8V1Der>::as_der(a).unwrap();
+    }
+
     #[test]
     fn test_disk_keys() {
         let personal_key = PersonalKey::derive("test@test.com", "password123");
@@ -310,8 +314,8 @@ mod tests {
         let disk_keys = DiskKeys::new(&personal_key, &kp);
         // make sure that its to_memory works
         let kp_recovered = disk_keys.to_memory(&personal_key);
-        assert_eq!(kp.pkpub, kp_recovered.pkpub);
-        assert_eq!(kp.pkpriv, kp_recovered.pkpriv);
+        assert_eq!(pub_der(&kp.pkpub), pub_der(&kp_recovered.pkpub));
+        assert_eq!(priv_der(&kp.pkpriv), priv_der(&kp_recovered.pkpriv));
     }
 
     #[test]
@@ -319,8 +323,8 @@ mod tests {
         // generate key pairs
         let kp1 = PkKeyPair::new();
         let kp2 = PkKeyPair::new();
-        assert_ne!(kp1.pkpub, kp2.pkpub);
-        assert_ne!(kp1.pkpriv, kp2.pkpriv);
+        assert_eq!(pub_der(&kp1.pkpub), pub_der(&kp2.pkpub));
+        assert_eq!(priv_der(&kp1.pkpriv), priv_der(&kp2.pkpriv));
 
         // encrypt group key for them and recover
         let encrypted_group_keys =
