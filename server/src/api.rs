@@ -294,23 +294,35 @@ struct FileForm {
 
 #[utoipa::path(
     get,
-    path = "/ws/file-receive",
+    path = "/ws/file-upload",
     tag = "WebSockets",
     responses(
-        (status = 101, description = "Switching Protocols: WebSocket file stream ready"),
-        (status = 401, description = "Unauthorized: User email and password mismatch"),
+        (status=BAD_REQUEST, description="Failed to get group or user not in group"),
     ),
     params(
         UserAuth,
         UploadFileQueryParams
     ),
 )]
-pub(crate) async fn ws_route_handler(
+pub(crate) async fn ws_file_upload(
     ws: WebSocketUpgrade,
     Query(params): Query<UploadFileQueryParams>,
     State(st): State<HandlerState>,
     Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
-) -> impl IntoResponse {
+) -> Response {
+    
+    // check if user is in the group
+    // since this is a read, then we can use threadlocal read-only connection
+    let group = match HandlerState::run_with_db(&st, |db| db::get_group(db, params.group_id)) {
+        Ok(group) => group,
+        Err(e) => {
+            println!("Failed to get group {e:?}");
+            return (StatusCode::BAD_REQUEST, "Failed to get group").into_response();
+        }
+    };
+    if !group.iter().any(|user| user.1 == user_id) {
+        return (StatusCode::BAD_REQUEST, "User not in group").into_response();
+    }
 
     ws.on_upgrade(move |mut socket| async move {
 
@@ -329,7 +341,7 @@ pub(crate) async fn ws_route_handler(
                         match text.as_str() {
                             "finish" => {
                                 if &*path == "" {
-                                    println!("path should not be empty");
+                                    println!("Path should not be empty");
                                     return;
                                 }
 
@@ -337,6 +349,7 @@ pub(crate) async fn ws_route_handler(
                                     println!("Failed to save file with {e:?}");
                                     // return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to save file")
                                     //     .into_response();
+                                    //TODO: find a way to return these responses somehow
                                     return;
                                 } else {
                                     // return (StatusCode::OK, Json(FileId { file_id })).into_response();
@@ -345,7 +358,7 @@ pub(crate) async fn ws_route_handler(
                                         let out : Bytes = Bytes::from(tmp);
                                         socket.send(Message::Binary(out)).await.unwrap();
                                     } else {
-                                        println!("Are you ok?");
+                                        println!("File ID was invalid somehow");
                                     }
                                     return;
                                 }
@@ -373,7 +386,7 @@ pub(crate) async fn ws_route_handler(
                                         println!("Failed to insert file with {e:?}");
                                         
                                         return;
-                                        // return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to insert file")  //TODO
+                                        // return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to insert file")  //TODO find a way to return these responses
                                         //     .into_response();
                                     }
                                 };
@@ -388,7 +401,7 @@ pub(crate) async fn ws_route_handler(
                     },
 
                     Message::Binary(data) => {
-                        bytes.append(&mut data.to_vec().clone()); //TODO rework?
+                        bytes.append(&mut data.to_vec().clone());
                     },
                     
                     Message::Close(_) => {

@@ -445,25 +445,7 @@ pub fn upload(
     let bytes = fs::read(&file)?;
     let mut encrypted_file = group_key.encrypt_file(&bytes);
 
-    // make request to upload endpoint
-    // let file_part = multipart::Part::bytes(postcard::to_allocvec(&encrypted_file)?)
-    //     .file_name(file.file_name().unwrap().to_str().unwrap().to_string())
-    //     .mime_str("application/octet-stream")?;
-    // let form = multipart::Form::new();
-    // let resp = client
-    //     .post(format!(
-    //         "{server_url}/api/v1/file?group_id={group_id}&user_email={email}&user_password_hash={encoded_password}",
-    //     ))
-    //     .multipart(form)
-    //     .send()?;
-    // if !resp.status().is_success() {
-    //     return Err(Box::from(format!(
-    //         "Server responded to file upload request with:\nStatus: {}\nResponse: {}",
-    //         resp.status(),
-    //         resp.text()?
-    //     )));
-    // }
-
+    //trim the server_url's beginning off
     let mut flag = false;
     let url_str_trimmed : String = server_url.chars().filter(|x| {
         if *x == ':' {
@@ -472,30 +454,20 @@ pub fn upload(
         flag
     }).collect();
 
-    let url_str = format!("ws{url_str_trimmed}/ws/file-receive?group_id={group_id}&user_email={email}&user_password_hash={encoded_password}");
+    let url_str = format!("ws{url_str_trimmed}/ws/file-upload?group_id={group_id}&user_email={email}&user_password_hash={encoded_password}");
 
-    println!("Attempting to connect to: {}", url_str);
+    let (mut socket, _) = tungstenite::connect(url_str).expect("Can't connect to WebSocket server");
 
-    let (mut socket, response) = tungstenite::connect(url_str).expect("Can't connect to WebSocket server");
-
-    println!("Connected! HTTP Status: {}", response.status());
-
-    // 3. Send Metadata (Filename)
-    let file_name = file.file_name().expect("oh shit").to_str().expect("oh shit 2");
+    // send file name
+    let file_name = file.file_name().expect("File name is invalid").to_str().expect("File name is invalid");
     let file_name_utf8 = Utf8Bytes::from(file_name);
-
-    println!("Sending filename: {}", file_name);
-    socket.send(Message::Text(file_name_utf8))
-        .expect("Failed to send filename");
-
-    println!("Sent filename");
+    socket.send(Message::Text(file_name_utf8)).expect("Failed to send filename");
         
-    // Wait for the server's acknowledgement (e.g., "Ready for file data.")
+    // wait for the server's acknowledgement
     match socket.read() {
-        Ok(Message::Text(ack)) => println!("Server Ack: {}", ack),
+        Ok(Message::Text(_)) => {},
         _ => {
-            eprintln!("Did not receive expected server acknowledgment.");
-            return Err(Box::new(io::Error::new(io::ErrorKind::Other, "Handshake failed")));
+            return Err(Box::new(io::Error::new(io::ErrorKind::Other, "Server improperly acknowledged for file upload")));
         }
     }
 
@@ -506,8 +478,6 @@ pub fn upload(
         let chunk_owned = chunk.to_vec();
         socket.send(Message::Binary(Bytes::from(chunk_owned))).unwrap();
     }
-
-    println!("File streaming complete");
 
     let mut tmp : [u8; 8] = [0; 8];
     socket.send(Message::Text(Utf8Bytes::from("finish"))).unwrap();
