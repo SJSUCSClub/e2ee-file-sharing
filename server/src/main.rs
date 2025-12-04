@@ -48,6 +48,7 @@ async fn main() {
     let (auth_app, auth_openapi) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(api::list_files))
         .routes(routes!(api::get_file))
+        .routes(routes!(api::ws_route_handler))
         .routes(routes!(api::upload_file))
         .routes(routes!(api::get_file_info))
         .routes(routes!(api::get_user_info))

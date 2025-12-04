@@ -1,16 +1,14 @@
 use std::{
-    error::Error,
-    fs,
-    io::{self, Write},
-    path::{Path, PathBuf},
+    error::Error, fs, io::{self, Write}, ops::Index, path::{Path, PathBuf}
 };
 
 use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE, Engine as _};
 use corelib::client::{DiskKeys, EncryptedFile, GroupKey, PersonalKey, PkKeyPair};
 use models::*;
-use reqwest::{StatusCode, blocking::multipart};
+use reqwest::{StatusCode, Url, blocking::multipart};
 use rpassword::read_password;
 use rsa::pkcs8::DecodePublicKey;
+use tungstenite::{Bytes, Message, Utf8Bytes};
 
 /// Decrypts the user's private key and fetches their user info from the server
 ///
@@ -445,27 +443,84 @@ pub fn upload(
 
     // encrypt file
     let bytes = fs::read(&file)?;
-    let encrypted_file = group_key.encrypt_file(&bytes);
+    let mut encrypted_file = group_key.encrypt_file(&bytes);
 
     // make request to upload endpoint
-    let file_part = multipart::Part::bytes(postcard::to_allocvec(&encrypted_file)?)
-        .file_name(file.file_name().unwrap().to_str().unwrap().to_string())
-        .mime_str("application/octet-stream")?;
-    let form = multipart::Form::new().part("file", file_part);
-    let resp = client
-        .post(format!(
-            "{server_url}/api/v1/file?group_id={group_id}&user_email={email}&user_password_hash={encoded_password}",
-        ))
-        .multipart(form)
-        .send()?;
-    if !resp.status().is_success() {
-        return Err(Box::from(format!(
-            "Server responded to file upload request with:\nStatus: {}\nResponse: {}",
-            resp.status(),
-            resp.text()?
-        )));
+    // let file_part = multipart::Part::bytes(postcard::to_allocvec(&encrypted_file)?)
+    //     .file_name(file.file_name().unwrap().to_str().unwrap().to_string())
+    //     .mime_str("application/octet-stream")?;
+    // let form = multipart::Form::new();
+    // let resp = client
+    //     .post(format!(
+    //         "{server_url}/api/v1/file?group_id={group_id}&user_email={email}&user_password_hash={encoded_password}",
+    //     ))
+    //     .multipart(form)
+    //     .send()?;
+    // if !resp.status().is_success() {
+    //     return Err(Box::from(format!(
+    //         "Server responded to file upload request with:\nStatus: {}\nResponse: {}",
+    //         resp.status(),
+    //         resp.text()?
+    //     )));
+    // }
+
+    let mut flag = false;
+    let url_str_trimmed : String = server_url.chars().filter(|x| {
+        if *x == ':' {
+            flag = true;
+        }
+        flag
+    }).collect();
+
+    let url_str = format!("ws{url_str_trimmed}/ws/file-receive?group_id={group_id}&user_email={email}&user_password_hash={encoded_password}");
+
+    println!("Attempting to connect to: {}", url_str);
+
+    let (mut socket, response) = tungstenite::connect(url_str).expect("Can't connect to WebSocket server");
+
+    println!("Connected! HTTP Status: {}", response.status());
+
+    // 3. Send Metadata (Filename)
+    let file_name = file.file_name().expect("oh shit").to_str().expect("oh shit 2");
+    let file_name_utf8 = Utf8Bytes::from(file_name);
+
+    println!("Sending filename: {}", file_name);
+    socket.send(Message::Text(file_name_utf8))
+        .expect("Failed to send filename");
+
+    println!("Sent filename");
+        
+    // Wait for the server's acknowledgement (e.g., "Ready for file data.")
+    match socket.read() {
+        Ok(Message::Text(ack)) => println!("Server Ack: {}", ack),
+        _ => {
+            eprintln!("Did not receive expected server acknowledgment.");
+            return Err(Box::new(io::Error::new(io::ErrorKind::Other, "Handshake failed")));
+        }
     }
 
-    let result: FileId = resp.json()?;
-    Ok(result.file_id)
+    let encrypted_file_bytes = postcard::to_allocvec(&encrypted_file)?;
+
+    // stream the file
+    for chunk in encrypted_file_bytes.chunks(1000) {
+        let chunk_owned = chunk.to_vec();
+        socket.send(Message::Binary(Bytes::from(chunk_owned))).unwrap();
+    }
+
+    println!("File streaming complete");
+
+    // let last = socket.read().unwrap().into_data(); //get the file id from ehre
+    // for (i, b) in last.iter().enumerate() {
+    //     tmp[i] = *b;
+    // }
+    // let file_id = i64::from_le_bytes(tmp);
+    //Ok(file_id)
+
+
+    socket.send(Message::Close(None)).expect("Failed to send Close message");
+
+
+    let mut tmp: [u8; 8] = [0; 8];
+    
+    Ok(0)
 }
