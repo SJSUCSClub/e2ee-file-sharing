@@ -1,5 +1,9 @@
 use std::{
-    error::Error, fs, io::{self, Write}, ops::Index, path::{Path, PathBuf}
+    error::Error,
+    fs,
+    io::{self, Write},
+    ops::Index,
+    path::{Path, PathBuf},
 };
 
 use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE, Engine as _};
@@ -447,27 +451,41 @@ pub fn upload(
 
     //trim the server_url's beginning off
     let mut flag = false;
-    let url_str_trimmed : String = server_url.chars().filter(|x| {
-        if *x == ':' {
-            flag = true;
-        }
-        flag
-    }).collect();
+    let url_str_trimmed: String = server_url
+        .chars()
+        .filter(|x| {
+            if *x == ':' {
+                flag = true;
+            }
+            flag
+        })
+        .collect();
 
-    let url_str = format!("ws{url_str_trimmed}/ws/file-upload?group_id={group_id}&user_email={email}&user_password_hash={encoded_password}");
+    let url_str = format!(
+        "ws{url_str_trimmed}/ws/file-upload?group_id={group_id}&user_email={email}&user_password_hash={encoded_password}"
+    );
 
     let (mut socket, _) = tungstenite::connect(url_str).expect("Can't connect to WebSocket server");
 
     // send file name
-    let file_name = file.file_name().expect("File name is invalid").to_str().expect("File name is invalid");
+    let file_name = file
+        .file_name()
+        .expect("File name is invalid")
+        .to_str()
+        .expect("File name is invalid");
     let file_name_utf8 = Utf8Bytes::from(file_name);
-    socket.send(Message::Text(file_name_utf8)).expect("Failed to send filename");
-        
+    socket
+        .send(Message::Text(file_name_utf8))
+        .expect("Failed to send filename");
+
     // wait for the server's acknowledgement
     match socket.read() {
-        Ok(Message::Text(_)) => {},
+        Ok(Message::Text(_)) => {}
         _ => {
-            return Err(Box::new(io::Error::new(io::ErrorKind::Other, "Server improperly acknowledged for file upload")));
+            return Err(Box::new(io::Error::new(
+                io::ErrorKind::Other,
+                "Server improperly acknowledged for file upload",
+            )));
         }
     }
 
@@ -476,11 +494,15 @@ pub fn upload(
     // stream the file
     for chunk in encrypted_file_bytes.chunks(1000) {
         let chunk_owned = chunk.to_vec();
-        socket.send(Message::Binary(Bytes::from(chunk_owned))).unwrap();
+        socket
+            .send(Message::Binary(Bytes::from(chunk_owned)))
+            .unwrap();
     }
 
-    let mut tmp : [u8; 8] = [0; 8];
-    socket.send(Message::Text(Utf8Bytes::from("finish"))).unwrap();
+    let mut tmp: [u8; 8] = [0; 8];
+    socket
+        .send(Message::Text(Utf8Bytes::from("finish")))
+        .unwrap();
     let file_id_read = socket.read().unwrap().into_data(); //get the file id
     for (i, b) in file_id_read.iter().enumerate() {
         tmp[i] = *b;
@@ -488,6 +510,6 @@ pub fn upload(
     let file_id = i64::from_le_bytes(tmp);
 
     socket.send(Message::Close(None)).unwrap();
-    
+
     Ok(file_id)
 }

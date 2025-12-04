@@ -1,7 +1,10 @@
 use axum::{
     Extension, Json,
     body::{Body, Bytes},
-    extract::{Multipart, Path, Query, Request, State, ws::{Message, Utf8Bytes, WebSocket, WebSocketUpgrade}},
+    extract::{
+        Multipart, Path, Query, Request, State,
+        ws::{Message, Utf8Bytes, WebSocket, WebSocketUpgrade},
+    },
     http::{StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -310,7 +313,6 @@ pub(crate) async fn ws_file_upload(
     State(st): State<HandlerState>,
     Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
 ) -> Response {
-    
     // check if user is in the group
     // since this is a read, then we can use threadlocal read-only connection
     let group = match HandlerState::run_with_db(&st, |db| db::get_group(db, params.group_id)) {
@@ -325,19 +327,16 @@ pub(crate) async fn ws_file_upload(
     }
 
     ws.on_upgrade(move |mut socket| async move {
-
         let mut file_name: String;
 
         let mut path = "".to_string();
-        let mut bytes : Vec<u8> = Vec::new();
-        let mut file_id : Option<i64> = None;
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut file_id: Option<i64> = None;
 
         while let Some(msg_result) = socket.recv().await {
-
             if let Ok(msg) = msg_result {
                 match msg {
                     Message::Text(text) => {
-
                         match text.as_str() {
                             "finish" => {
                                 if &*path == "" {
@@ -355,16 +354,16 @@ pub(crate) async fn ws_file_upload(
                                     // return (StatusCode::OK, Json(FileId { file_id })).into_response();
                                     if file_id.is_some() {
                                         let tmp = file_id.unwrap().to_le_bytes().to_vec();
-                                        let out : Bytes = Bytes::from(tmp);
+                                        let out: Bytes = Bytes::from(tmp);
                                         socket.send(Message::Binary(out)).await.unwrap();
                                     } else {
                                         println!("File ID was invalid somehow");
                                     }
                                     return;
                                 }
-                            },
+                            }
                             _ => {
-                                    file_name = text.to_string();
+                                file_name = text.to_string();
 
                                 // insert into DB
                                 // first, initialize channel to connection thread
@@ -384,7 +383,7 @@ pub(crate) async fn ws_file_upload(
                                     Ok(file_id) => Some(file_id),
                                     Err(e) => {
                                         println!("Failed to insert file with {e:?}");
-                                        
+
                                         return;
                                         // return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to insert file")  //TODO find a way to return these responses
                                         //     .into_response();
@@ -395,22 +394,22 @@ pub(crate) async fn ws_file_upload(
                                     println!("file_id is not ok");
                                 }
                                 path = to_path(&st.upload_directory, file_id.unwrap());
-                                let _ = socket.send(Message::Text(Utf8Bytes::from("Ready for file data"))).await;
+                                let _ = socket
+                                    .send(Message::Text(Utf8Bytes::from("Ready for file data")))
+                                    .await;
                             }
                         }
-                    },
+                    }
 
                     Message::Binary(data) => {
                         bytes.append(&mut data.to_vec().clone());
-                    },
-                    
-                    Message::Close(_) => {
-                        
                     }
+
+                    Message::Close(_) => {}
                     _ => {}
                 }
             }
-        }        
+        }
     })
 }
 
