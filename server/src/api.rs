@@ -312,11 +312,7 @@ pub(crate) async fn ws_route_handler(
     Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
 ) -> impl IntoResponse {
 
-    println!("1");
-
     ws.on_upgrade(move |mut socket| async move {
-
-        println!("2");
 
         let mut file_name: String;
 
@@ -325,60 +321,70 @@ pub(crate) async fn ws_route_handler(
         let mut file_id : Option<i64> = None;
 
         while let Some(msg_result) = socket.recv().await {
-            println!("3");
 
             if let Ok(msg) = msg_result {
-                    println!("4");
                 match msg {
-                    Message::Text(filename) => {
-                        // 1. Client sends the filename first as a TEXT message.
+                    Message::Text(text) => {
 
-                        println!("a");
+                        match text.as_str() {
+                            "finish" => {
+                                if &*path == "" {
+                                    println!("path should not be empty");
+                                    return;
+                                }
 
-                        file_name = filename.to_string();
+                                if let Err(e) = tokio::fs::write(path, bytes).await {
+                                    println!("Failed to save file with {e:?}");
+                                    // return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to save file")
+                                    //     .into_response();
+                                    return;
+                                } else {
+                                    // return (StatusCode::OK, Json(FileId { file_id })).into_response();
+                                    if file_id.is_some() {
+                                        let tmp = file_id.unwrap().to_le_bytes().to_vec();
+                                        let out : Bytes = Bytes::from(tmp);
+                                        socket.send(Message::Binary(out)).await.unwrap();
+                                    } else {
+                                        println!("Are you ok?");
+                                    }
+                                    return;
+                                }
+                            },
+                            _ => {
+                                    file_name = text.to_string();
 
-                        // insert into DB
-                        // first, initialize channel to connection thread
-                        let (tx, rx) = oneshot::channel();
+                                // insert into DB
+                                // first, initialize channel to connection thread
+                                let (tx, rx) = oneshot::channel();
 
-                        println!("b");
+                                st.tx
+                                    .send(DatabaseCommand::InsertFile {
+                                        group_id: params.group_id,
+                                        filename: file_name,
+                                        responder: tx,
+                                    })
+                                    .await
+                                    .unwrap();
 
-                        st.tx
-                            .send(DatabaseCommand::InsertFile {
-                                group_id: params.group_id,
-                                filename: file_name,
-                                responder: tx,
-                            })
-                            .await
-                            .unwrap();
+                                // then match result
+                                file_id = match rx.await.unwrap() {
+                                    Ok(file_id) => Some(file_id),
+                                    Err(e) => {
+                                        println!("Failed to insert file with {e:?}");
+                                        
+                                        return;
+                                        // return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to insert file")  //TODO
+                                        //     .into_response();
+                                    }
+                                };
 
-                        println!("c");
-
-                        // then match result
-                        file_id = match rx.await.unwrap() {
-                            Ok(file_id) => Some(file_id),
-                            Err(e) => {
-                                println!("Failed to insert file with {e:?}");
-                                
-                                return;
-                                // return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to insert file")  //TODO
-                                //     .into_response();
+                                if file_id.is_none() {
+                                    println!("file_id is not ok");
+                                }
+                                path = to_path(&st.upload_directory, file_id.unwrap());
+                                let _ = socket.send(Message::Text(Utf8Bytes::from("Ready for file data"))).await;
                             }
-                        };
-
-                        println!("d");
-
-                        if file_id.is_none() {
-                            println!("file_id is not ok");
                         }
-
-                        println!("e");
-
-                        path = to_path(&st.upload_directory, file_id.unwrap());
-
-                        println!("f");
-
-                        let _ = socket.send(Message::Text(Utf8Bytes::from("Ready for file data"))).await;
                     },
 
                     Message::Binary(data) => {
@@ -386,27 +392,7 @@ pub(crate) async fn ws_route_handler(
                     },
                     
                     Message::Close(_) => {
-                        if &*path == "" {
-                            println!("path should not be empty");
-                            return;
-                        }
-
-                        if let Err(e) = tokio::fs::write(path, bytes).await {
-                            println!("Failed to save file with {e:?}");
-                            // return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to save file")
-                            //     .into_response();
-                            return;
-                        } else {
-                            // return (StatusCode::OK, Json(FileId { file_id })).into_response();
-                            if file_id.is_some() {
-                                let tmp = file_id.unwrap().to_le_bytes().to_vec();
-                                let out : Bytes = Bytes::from(tmp);
-                                // socket.send(Message::Binary(out)).await.unwrap();
-                            } else {
-                                println!("Are you ok?");
-                            }
-                            return;
-                        }
+                        
                     }
                     _ => {}
                 }

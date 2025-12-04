@@ -509,18 +509,15 @@ pub fn upload(
 
     println!("File streaming complete");
 
-    // let last = socket.read().unwrap().into_data(); //get the file id from ehre
-    // for (i, b) in last.iter().enumerate() {
-    //     tmp[i] = *b;
-    // }
-    // let file_id = i64::from_le_bytes(tmp);
-    //Ok(file_id)
+    let mut tmp : [u8; 8] = [0; 8];
+    socket.send(Message::Text(Utf8Bytes::from("finish"))).unwrap();
+    let file_id_read = socket.read().unwrap().into_data(); //get the file id
+    for (i, b) in file_id_read.iter().enumerate() {
+        tmp[i] = *b;
+    }
+    let file_id = i64::from_le_bytes(tmp);
 
-
-    socket.send(Message::Close(None)).expect("Failed to send Close message");
-
-
-    let mut tmp: [u8; 8] = [0; 8];
+    socket.send(Message::Close(None)).unwrap();
     
-    Ok(0)
+    Ok(file_id)
 }
