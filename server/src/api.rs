@@ -3,7 +3,7 @@ use axum::{
     body::{Body, Bytes},
     extract::{
         Multipart, Path, Query, Request, State,
-        ws::{Message, Utf8Bytes, WebSocket, WebSocketUpgrade},
+        ws::{Message, Utf8Bytes, WebSocketUpgrade},
     },
     http::{StatusCode, header},
     middleware::Next,
@@ -19,7 +19,7 @@ use tokio::sync::{
     mpsc::{self, Sender},
     oneshot,
 };
-use tokio_util::{bytes::Buf, io::ReaderStream};
+use tokio_util::io::ReaderStream;
 
 use crate::db::{self, Database};
 

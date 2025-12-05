@@ -2,14 +2,13 @@ use std::{
     error::Error,
     fs,
     io::{self, Write},
-    ops::Index,
     path::{Path, PathBuf},
 };
 
 use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE, Engine as _};
 use corelib::client::{DiskKeys, EncryptedFile, GroupKey, PersonalKey, PkKeyPair};
 use models::*;
-use reqwest::{StatusCode, Url, blocking::multipart};
+use reqwest::StatusCode;
 use rpassword::read_password;
 use rsa::pkcs8::DecodePublicKey;
 use tungstenite::{Bytes, Message, Utf8Bytes};
@@ -447,7 +446,7 @@ pub fn upload(
 
     // encrypt file
     let bytes = fs::read(&file)?;
-    let mut encrypted_file = group_key.encrypt_file(&bytes);
+    let encrypted_file = group_key.encrypt_file(&bytes);
 
     //trim the server_url's beginning off
     let mut flag = false;
