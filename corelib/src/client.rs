@@ -301,6 +301,15 @@ impl GroupKey {
 pub mod file_stream_encryption {
     use super::*;
 
+    // TODO:
+    // documentation
+    // make FileStreamEncryption hold cipher, nonce_start, and curr_ind so you can make helper methods
+    // Implement stdin/stdout with this stream stuff in mind?
+    // shared library crate "common" that holds CHUNK_SIZE and MAC_SIZE?
+    pub struct FileStreamEncryption {
+
+    }
+
     pub fn encrypt_chunk(
         cipher : &Aes256Gcm,
         bytes: &[u8],
