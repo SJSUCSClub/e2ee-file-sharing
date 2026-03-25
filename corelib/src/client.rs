@@ -1,6 +1,5 @@
 use aes_gcm::{
-    Aes256Gcm, Key,
-    aead::{Aead, AeadCore, AeadInPlace, KeyInit},
+    Aes256Gcm, Key, Nonce, aead::{Aead, AeadCore, AeadInPlace, KeyInit, Payload}
 };
 use argon2::{Algorithm, Argon2, Params, Version};
 use rand::rngs::OsRng;
@@ -269,6 +268,7 @@ impl GroupKey {
             bytes,
         }
     }
+
     /// Decrypts a file using the group key and the nonce
     /// Returns the decrypted bytes
     ///
@@ -285,6 +285,54 @@ impl GroupKey {
         let nonce = GenericArray::from_slice(encrypted_file.nonce.as_slice());
         cipher
             .decrypt(&nonce, encrypted_file.bytes.as_slice())
+            .expect("Failed to decrypt file")
+    }
+
+    /// Gets the cipher from the group key.
+    /// Returns the cipher.
+    /// 
+    /// # Returns
+    /// The cipher
+    pub fn get_cipher(&self) -> Aes256Gcm {
+        Aes256Gcm::new_from_slice(self.key.as_slice()).expect("Failed to init AES-GCM")
+    }
+}
+
+pub mod file_stream_encryption {
+    use super::*;
+
+    pub fn encrypt_chunk(
+        cipher : &Aes256Gcm,
+        bytes: &[u8],
+        nonce_start : [u8; 8],
+        chunk_ind : u32,
+        final_chunk : bool
+    ) -> Vec<u8> {
+        let mut nonce_bytes : [u8; 12] = [0; 12];
+        nonce_bytes[..8].copy_from_slice(&nonce_start[..8]);
+        nonce_bytes[8..].copy_from_slice(&chunk_ind.to_be_bytes());
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        let aad_byte : &[u8] = if final_chunk {
+            &[1]
+        } else {
+            &[0]
+        };
+
+        let payload = Payload {
+            msg: bytes,
+            aad: aad_byte
+        };
+        cipher.encrypt(nonce, payload).unwrap_or_else(|_| panic!("Failed to encrypt chunk {}", chunk_ind))
+    }
+
+    pub fn decrypt_chunk(
+        nonce : [u8; 12],
+        payload : &[u8],
+        cipher : &Aes256Gcm
+    ) -> Vec<u8> {
+        cipher
+            .decrypt(&nonce.into(), payload)
             .expect("Failed to decrypt file")
     }
 }
