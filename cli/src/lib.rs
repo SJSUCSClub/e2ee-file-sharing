@@ -1,10 +1,21 @@
 use std::{
-    error::Error, fmt::format, fs, io::{self, Write}, ops::Index, path::{Path, PathBuf}
+    error::Error,
+    fmt::format,
+    fs,
+    io::{self, Write},
+    ops::Index,
+    path::{Path, PathBuf},
 };
 
-use aes_gcm::{AeadCore, KeyInit, Nonce, aead::{Aead, OsRng, Payload}};
+use aes_gcm::{
+    AeadCore, KeyInit, Nonce,
+    aead::{Aead, OsRng, Payload},
+};
 use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE, Engine as _};
-use corelib::client::{DiskKeys, EncryptedFile, file_stream_encryption, GroupKey, PersonalKey, PkKeyPair};
+use corelib::client::{
+    DiskKeys, EncryptedFile, GroupKey, PersonalKey, PkKeyPair,
+    file_stream_encryption::{self, CHUNK_SIZE, FileStreamEncryptor, MAC_SIZE},
+};
 use models::*;
 use reqwest::StatusCode;
 use rpassword::read_password;
@@ -237,67 +248,22 @@ pub fn download(
         )));
     }
 
-    // decrypt bytes
-    // let bytes = resp.bytes()?;
-    // let encrypted_file: EncryptedFile = postcard::from_bytes(&bytes)?;
-    // let bytes = group_key.decrypt_file(&encrypted_file);
-
+    // get bytes
     let bytes = resp.bytes()?;
     if bytes.len() < 8 {
-        return Err(Box::from(
-            "Response size too small"
-        ));
+        return Err(Box::from("Response size too small"));
     }
 
-    let nonce_start : [u8; 8] = bytes[0..8].try_into().unwrap();
-
+    let nonce_start: [u8; 8] = bytes[0..8].try_into().unwrap();
     let encrypted_data = &bytes[8..];
 
     let cipher = group_key.get_cipher();
-    let mut curr_ind : u32 = 0;
     let mut decrypted_file = Vec::new();
 
-    for chunk in encrypted_data.chunks(1016) {
-        // find the 12 byte nonce
-        let mut nonce_bytes : [u8; 12] = [0; 12];
-        nonce_bytes[..8].copy_from_slice(&nonce_start);
-        nonce_bytes[8..].copy_from_slice(&curr_ind.to_be_bytes());
-        let nonce = Nonce::from_slice(&nonce_bytes);
+    let fse = FileStreamEncryptor::new_with_nonce_start(cipher, nonce_start);
 
-        // start with assuming it's NOT final chunk
-        let payload_message = Payload {
-            msg: chunk,
-            aad: &[0]
-        };
-
-        match cipher.decrypt(nonce, payload_message) {
-            Ok(x) => {
-                decrypted_file.extend_from_slice(&x);
-                curr_ind += 1;
-            },
-
-            Err(_) => {
-                // try assuming its final chunk
-                let payload_final = Payload {
-                    msg: chunk,
-                    aad: &[1]
-                };
-
-                match cipher.decrypt(nonce, payload_final) {
-                    Ok(x) => {
-                        decrypted_file.extend_from_slice(&x);
-                        curr_ind += 1;
-                    },
-
-                    Err(e) => {
-                        return Err(Box::from(format!(
-                            "Decryption failed at chunk {}.",
-                            curr_ind
-                        )))
-                    }
-                }
-            }
-        }
+    for chunk in fse.decrypt_chunks_to_iter(encrypted_data) {
+        decrypted_file.extend_from_slice(&chunk);
     }
 
     Ok(fs::write(&output_path, decrypted_file)?)
@@ -525,6 +491,7 @@ pub fn upload(
         .to_str()
         .expect("File name is invalid");
     let file_name_utf8 = Utf8Bytes::from(file_name);
+
     socket
         .send(Message::Text(file_name_utf8))
         .expect("Failed to send filename");
@@ -540,41 +507,27 @@ pub fn upload(
         }
     }
 
-
     let bytes = fs::read(&file)?;
-
-    let chunk_count = bytes.chunks(1000).len();
-    let nonce = aes_gcm::Aes256Gcm::generate_nonce(OsRng);
-    let nonce_start : [u8; 8] = nonce[0..8].try_into().unwrap();
-
-    // send nonce_start to the server
-    socket.send(Message::Binary(Bytes::from_iter(nonce_start.clone().into_iter()))).unwrap();
-
     let cipher = group_key.get_cipher();
 
-    let encrypted_chunks_iter = bytes
-        .chunks(1000)
-        .enumerate()
-        .map(|(i, chunk_bytes)| {
-            file_stream_encryption::encrypt_chunk(&cipher, chunk_bytes, nonce_start, i as u32, i >= chunk_count - 1)
-        });
+    let fse = FileStreamEncryptor::new(cipher);
+
+    // send nonce_start to the server
+    socket.send(Message::Binary(fse.nonce_as_bytes())).unwrap();
 
     // stream the file
-    for chunk in encrypted_chunks_iter {
-        socket
-            .send(Message::Binary(Bytes::from(chunk)))
-            .unwrap();
+    for chunk in fse.encrypt_bytes_to_chunks(&bytes) {
+        socket.send(Message::Binary(Bytes::from(chunk))).unwrap();
     }
 
-    let mut tmp: [u8; 8] = [0; 8];
     socket
         .send(Message::Text(Utf8Bytes::from("finish")))
         .unwrap();
     let file_id_read = socket.read().unwrap().into_data(); //get the file id
-    for (i, b) in file_id_read.iter().enumerate() {
-        tmp[i] = *b;
-    }
-    let file_id = i64::from_le_bytes(tmp);
+
+    let mut file_id_bytes: [u8; 8] = [0; 8];
+    file_id_bytes.copy_from_slice(&file_id_read);
+    let file_id = i64::from_le_bytes(file_id_bytes);
 
     socket.send(Message::Close(None)).unwrap();
 

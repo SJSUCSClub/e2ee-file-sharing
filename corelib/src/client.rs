@@ -1,5 +1,4 @@
-use aes_gcm::{
-    Aes256Gcm, Key, Nonce, aead::{Aead, AeadCore, AeadInPlace, KeyInit, Payload}
+use aes_gcm::{     Aes256Gcm, Key, Nonce, aead::{Aead, AeadCore, AeadInPlace, KeyInit, Payload}
 };
 use argon2::{Algorithm, Argon2, Params, Version};
 use rand::rngs::OsRng;
@@ -11,6 +10,7 @@ use rsa::{
 use rsa::{RsaPrivateKey, RsaPublicKey, pkcs8};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, digest::generic_array::GenericArray};
+use bytes::Bytes;
 
 /// AES-256 key size in bytes. Same as [Aes256Gcm::key_size].
 const PERSONAL_KEY_LEN: usize = 32;
@@ -298,19 +298,118 @@ impl GroupKey {
     }
 }
 
+/// Module for file streaming encryption and decryption, used in client-side code.
 pub mod file_stream_encryption {
     use super::*;
 
-    // TODO:
-    // documentation
-    // make FileStreamEncryption hold cipher, nonce_start, and curr_ind so you can make helper methods
-    // Implement stdin/stdout with this stream stuff in mind?
-    // shared library crate "common" that holds CHUNK_SIZE and MAC_SIZE?
-    pub struct FileStreamEncryption {
+    /// Size of a chunk in bytes.
+    pub const CHUNK_SIZE : usize = 1000;
+    /// Size of the AES-GCM Authentication Tag (MAC) in bytes.
+    pub const MAC_SIZE : usize = 16;
 
+    /// A struct for encrypting and decrypting in chunks for streaming
+    pub struct FileStreamEncryptor {
+        cipher : Aes256Gcm,
+        nonce_start : [u8; 8],
     }
 
-    pub fn encrypt_chunk(
+    impl FileStreamEncryptor {
+        pub fn new(cipher : Aes256Gcm) -> FileStreamEncryptor {
+            let nonce = aes_gcm::Aes256Gcm::generate_nonce(OsRng);
+            let nonce_start : [u8; 8] = nonce[0..8].try_into().expect("Nonce truncation failed");
+
+            FileStreamEncryptor {
+                nonce_start: nonce_start,
+                cipher: cipher,
+            }
+        }
+
+        pub fn new_with_nonce_start(cipher : Aes256Gcm, nonce_start : [u8; 8]) -> FileStreamEncryptor {
+            FileStreamEncryptor {
+                nonce_start: nonce_start,
+                cipher: cipher,
+            }
+        }
+
+        /// # Returns
+        /// The nonce as Bytes
+        pub fn nonce_as_bytes(&self) -> Bytes {
+            Bytes::from_iter(self.nonce_start.iter().map(|x| *x))
+        }
+
+        /// Encrypts `bytes` in chunks of size `CHUNK_SIZE` in bytes, using an incrementing nonce.
+        /// 
+        /// # Returns
+        /// An iterator over the encrypted chunks, where a chunk is a `Vec<u8>`.
+        pub fn encrypt_bytes_to_chunks<'a>(&'a self, bytes : &'a Vec<u8>) -> impl Iterator<Item = Vec<u8>> + 'a {
+            let chunk_count = bytes.chunks(CHUNK_SIZE).len();
+            bytes
+                .chunks(CHUNK_SIZE)
+                .enumerate()
+                .map(move |(i, chunk_bytes)| {
+                    file_stream_encryption::encrypt_chunk(&self.cipher, chunk_bytes, self.nonce_start, i as u32, i >= chunk_count - 1)
+                })
+        }
+
+        /// Encrypts a chunk of size `CHUNK_SIZE` in bytes.
+        /// 
+        /// # Returns
+        /// An encrypted chunk as a `Vec<u8>`
+        pub fn encrypt_chunk(&self, bytes : &Vec<u8>, chunk_ind : u32, final_chunk : bool) -> Vec<u8> {
+            encrypt_chunk(&self.cipher, bytes, self.nonce_start, chunk_ind, final_chunk)
+        }
+
+        pub fn decrypt_chunks_to_iter<'a>(&'a self, encrypted_data : &'a [u8]) -> impl Iterator<Item = Vec<u8>> + 'a {
+            encrypted_data
+                .chunks(CHUNK_SIZE + MAC_SIZE)
+                .enumerate()
+                .map(|(i, x)| {
+                    self.decrypt_chunk(x, i as u32).unwrap()
+                })
+        }
+
+        /// Decrypts a chunk of size `CHUNK_SIZE` + `MAC_SIZE` in bytes.
+        /// 
+        /// # Returns
+        /// In `Ok` variant, the decrypted chunk as a `Vec<u8>`.
+        pub fn decrypt_chunk(&self, encrypted_chunk : &[u8], chunk_ind : u32) -> Result<Vec<u8>, String> {
+            let mut nonce_bytes : [u8; 12] = [0; 12];
+            nonce_bytes[..8].copy_from_slice(&self.nonce_start);
+            nonce_bytes[8..].copy_from_slice(&chunk_ind.to_be_bytes());
+            let nonce = Nonce::from_slice(&nonce_bytes);
+            match self.cipher.decrypt(nonce, Payload {
+                msg: encrypted_chunk,
+                aad: &[0],
+            }) {
+                Ok(x) => {
+                    Ok(x)
+                },
+
+                Err(_) => {
+                    // try assuming its final chunk
+                    let payload_final = Payload {
+                        msg: encrypted_chunk,
+                        aad: &[1]
+                    };
+
+                    match self.cipher.decrypt(nonce, payload_final) {
+                        Ok(x) => {
+                            Ok(x)
+                        },
+
+                        Err(e) => {
+                            Err(format!(
+                                "Decryption failed at chunk {}.",
+                                chunk_ind
+                            ))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn encrypt_chunk(
         cipher : &Aes256Gcm,
         bytes: &[u8],
         nonce_start : [u8; 8],
@@ -333,16 +432,6 @@ pub mod file_stream_encryption {
             aad: aad_byte
         };
         cipher.encrypt(nonce, payload).unwrap_or_else(|_| panic!("Failed to encrypt chunk {}", chunk_ind))
-    }
-
-    pub fn decrypt_chunk(
-        nonce : [u8; 12],
-        payload : &[u8],
-        cipher : &Aes256Gcm
-    ) -> Vec<u8> {
-        cipher
-            .decrypt(&nonce.into(), payload)
-            .expect("Failed to decrypt file")
     }
 }
 
