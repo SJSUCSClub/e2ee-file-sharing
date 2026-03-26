@@ -10,7 +10,6 @@ use rsa::{
 use rsa::{RsaPrivateKey, RsaPublicKey, pkcs8};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, digest::generic_array::GenericArray};
-use bytes::Bytes;
 
 /// AES-256 key size in bytes. Same as [Aes256Gcm::key_size].
 const PERSONAL_KEY_LEN: usize = 32;
@@ -332,9 +331,9 @@ pub mod file_stream_encryption {
         }
 
         /// # Returns
-        /// The nonce as Bytes
-        pub fn nonce_as_bytes(&self) -> Bytes {
-            Bytes::from_iter(self.nonce_start.iter().map(|x| *x))
+        /// The 8-byte `nonce_start`
+        pub fn get_nonce_start(& self) -> &[u8] {
+            self.nonce_start.as_slice()
         }
 
         /// Encrypts `bytes` in chunks of size `CHUNK_SIZE` in bytes, using an incrementing nonce.
@@ -399,8 +398,9 @@ pub mod file_stream_encryption {
 
                         Err(e) => {
                             Err(format!(
-                                "Decryption failed at chunk {}.",
-                                chunk_ind
+                                "Decryption failed at chunk {}. Error: {}",
+                                chunk_ind,
+                                e
                             ))
                         }
                     }

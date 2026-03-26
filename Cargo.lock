@@ -876,7 +876,6 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "argon2",
- "bytes",
  "rand 0.8.5",
  "rsa",
  "serde",

@@ -1,20 +1,14 @@
 use std::{
     error::Error,
-    fmt::format,
     fs,
     io::{self, Write},
-    ops::Index,
     path::{Path, PathBuf},
 };
 
-use aes_gcm::{
-    AeadCore, KeyInit, Nonce,
-    aead::{Aead, OsRng, Payload},
-};
 use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE, Engine as _};
 use corelib::client::{
-    DiskKeys, EncryptedFile, GroupKey, PersonalKey, PkKeyPair,
-    file_stream_encryption::{self, CHUNK_SIZE, FileStreamEncryptor, MAC_SIZE},
+    DiskKeys, GroupKey, PersonalKey, PkKeyPair,
+    file_stream_encryption::FileStreamEncryptor,
 };
 use models::*;
 use reqwest::StatusCode;
@@ -513,7 +507,7 @@ pub fn upload(
     let fse = FileStreamEncryptor::new(cipher);
 
     // send nonce_start to the server
-    socket.send(Message::Binary(fse.nonce_as_bytes())).unwrap();
+    socket.send(Message::Binary(Bytes::from_iter(fse.get_nonce_start().iter().map(|x| *x)))).unwrap();
 
     // stream the file
     for chunk in fse.encrypt_bytes_to_chunks(&bytes) {
