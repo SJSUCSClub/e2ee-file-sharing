@@ -1,14 +1,15 @@
 use std::{
     error::Error,
-    fs,
-    io::{self, Write},
+    fs::{self, File, OpenOptions},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 
+use aes_gcm::{aead::generic_array::iter, aes::cipher};
 use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE, Engine as _};
 use corelib::client::{
     DiskKeys, GroupKey, PersonalKey, PkKeyPair,
-    file_stream_encryption::FileStreamEncryptor,
+    file_stream_encryption::{CHUNK_SIZE, FileStreamEncryptor, MAC_SIZE, NETWORK_CHUNK_SIZE},
 };
 use models::*;
 use reqwest::StatusCode;
@@ -229,7 +230,7 @@ pub fn download(
     )?;
 
     // make request to file endpoint
-    let resp = client
+    let mut resp = client
         .get(format!(
             "{server_url}/api/v1/file?file_id={file_id}&user_email={email}&user_password_hash={encoded_password}",
         ))
@@ -243,24 +244,65 @@ pub fn download(
     }
 
     // get bytes
-    let bytes = resp.bytes()?;
-    if bytes.len() < 8 {
-        return Err(Box::from("Response size too small"));
-    }
+    // let bytes = resp.bytes()?;
+    // if bytes.len() < 8 {
+    //     return Err(Box::from("Response size too small"));
+    // }
 
-    let nonce_start: [u8; 8] = bytes[0..8].try_into().unwrap();
-    let encrypted_data = &bytes[8..];
+    // let nonce_start: [u8; 8] = bytes[0..8].try_into().unwrap();
+    // let encrypted_data = &bytes[8..];
+
+    // let cipher = group_key.get_cipher();
+    // let mut decrypted_file = Vec::new();
+
+    // let fse = FileStreamEncryptor::new_with_nonce_start(cipher, nonce_start);
+
+    // for chunk in fse.decrypt_chunks_to_iter(encrypted_data) {
+    //     decrypted_file.extend_from_slice(&chunk);
+    // }
+
+    // Ok(fs::write(&output_path, decrypted_file)?)
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&output_path)?;
 
     let cipher = group_key.get_cipher();
-    let mut decrypted_file = Vec::new();
+
+    let mut nonce_start : [u8; 8] = [0; 8];
+    resp.read_exact(&mut nonce_start)?;
 
     let fse = FileStreamEncryptor::new_with_nonce_start(cipher, nonce_start);
 
-    for chunk in fse.decrypt_chunks_to_iter(encrypted_data) {
-        decrypted_file.extend_from_slice(&chunk);
+    let mut buf : Vec<u8> = Vec::new();
+    let mut net_chunk : [u8; NETWORK_CHUNK_SIZE] = [0; NETWORK_CHUNK_SIZE];
+    let mut curr_ind : u32 = 0;
+
+    loop {
+        let bytes_read = resp.read(&mut net_chunk)?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        buf.extend_from_slice(&net_chunk[..bytes_read]);
+
+        while buf.len() > CHUNK_SIZE + MAC_SIZE {
+            let chunk : Vec<u8> = buf.drain(..(CHUNK_SIZE + MAC_SIZE)).collect();
+            let decrypted_chunk = fse.decrypt_chunk(chunk.as_slice(), curr_ind)?;
+            file.write_all(&decrypted_chunk)?;
+            curr_ind += 1;
+        }
+
     }
 
-    Ok(fs::write(&output_path, decrypted_file)?)
+    // potentially, the final chunk is remaining after the loop has finished
+    if !buf.is_empty() {
+        let decrypted_bytes = fse.decrypt_chunk(&buf, curr_ind)?;
+        file.write_all(&decrypted_bytes)?;
+    }
+
+    Ok(())
 }
 
 /// Creates a group on the server and returns the group id

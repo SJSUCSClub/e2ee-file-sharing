@@ -301,6 +301,8 @@ impl GroupKey {
 pub mod file_stream_encryption {
     use super::*;
 
+    /// Size of a chunk being read, for downloading.
+    pub const NETWORK_CHUNK_SIZE : usize = 4096;
     /// Size of a chunk in bytes.
     pub const CHUNK_SIZE : usize = 1000;
     /// Size of the AES-GCM Authentication Tag (MAC) in bytes.
@@ -337,6 +339,7 @@ pub mod file_stream_encryption {
         }
 
         /// Encrypts `bytes` in chunks of size `CHUNK_SIZE` in bytes, using an incrementing nonce.
+        /// Panics if it couldn't properly encrypt a chunk.
         /// 
         /// # Returns
         /// An iterator over the encrypted chunks, where a chunk is a `Vec<u8>`.
@@ -347,6 +350,9 @@ pub mod file_stream_encryption {
                 .enumerate()
                 .map(move |(i, chunk_bytes)| {
                     file_stream_encryption::encrypt_chunk(&self.cipher, chunk_bytes, self.nonce_start, i as u32, i >= chunk_count - 1)
+                        .unwrap_or_else(|_| {
+                            panic!("Could not encrypt chunk {}", i)
+                        })
                 })
         }
 
@@ -354,10 +360,15 @@ pub mod file_stream_encryption {
         /// 
         /// # Returns
         /// An encrypted chunk as a `Vec<u8>`
-        pub fn encrypt_chunk(&self, bytes : &Vec<u8>, chunk_ind : u32, final_chunk : bool) -> Vec<u8> {
+        pub fn encrypt_chunk(&self, bytes : &Vec<u8>, chunk_ind : u32, final_chunk : bool) -> Result<Vec<u8>, aes_gcm::Error> {
             encrypt_chunk(&self.cipher, bytes, self.nonce_start, chunk_ind, final_chunk)
         }
 
+        /// Decrypts encrypted chunks `encrypted data`.
+        /// Panics if it couldn't properly decrypt a chunk.
+        /// 
+        /// # Returns
+        /// An iterator over the decrypted chunks, where a chunk is a `Vec<u8>`
         pub fn decrypt_chunks_to_iter<'a>(&'a self, encrypted_data : &'a [u8]) -> impl Iterator<Item = Vec<u8>> + 'a {
             encrypted_data
                 .chunks(CHUNK_SIZE + MAC_SIZE)
@@ -415,7 +426,7 @@ pub mod file_stream_encryption {
         nonce_start : [u8; 8],
         chunk_ind : u32,
         final_chunk : bool
-    ) -> Vec<u8> {
+    ) -> Result<Vec<u8>, aes_gcm::Error> {
         let mut nonce_bytes : [u8; 12] = [0; 12];
         nonce_bytes[..8].copy_from_slice(&nonce_start[..8]);
         nonce_bytes[8..].copy_from_slice(&chunk_ind.to_be_bytes());
@@ -431,7 +442,7 @@ pub mod file_stream_encryption {
             msg: bytes,
             aad: aad_byte
         };
-        cipher.encrypt(nonce, payload).unwrap_or_else(|_| panic!("Failed to encrypt chunk {}", chunk_ind))
+        cipher.encrypt(nonce, payload)
     }
 }
 
