@@ -1,7 +1,10 @@
 use axum::{
     Extension, Json,
-    body::Body,
-    extract::{Multipart, Path, Query, Request, State},
+    body::{Body, Bytes},
+    extract::{
+        Multipart, Path, Query, Request, State,
+        ws::{Message, Utf8Bytes, WebSocketUpgrade},
+    },
     http::{StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -290,6 +293,124 @@ pub(crate) struct UploadFileQueryParams {
 struct FileForm {
     #[schema(format=Binary, content_media_type="application/octet-stream")]
     file: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/ws/file-upload",
+    tag = "WebSockets",
+    responses(
+        (status=BAD_REQUEST, description="Failed to get group or user not in group"),
+    ),
+    params(
+        UserAuth,
+        UploadFileQueryParams
+    ),
+)]
+pub(crate) async fn ws_file_upload(
+    ws: WebSocketUpgrade,
+    Query(params): Query<UploadFileQueryParams>,
+    State(st): State<HandlerState>,
+    Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
+) -> Response {
+    // check if user is in the group
+    // since this is a read, then we can use threadlocal read-only connection
+    let group = match HandlerState::run_with_db(&st, |db| db::get_group(db, params.group_id)) {
+        Ok(group) => group,
+        Err(e) => {
+            println!("Failed to get group {e:?}");
+            return (StatusCode::BAD_REQUEST, "Failed to get group").into_response();
+        }
+    };
+    if !group.iter().any(|user| user.1 == user_id) {
+        return (StatusCode::BAD_REQUEST, "User not in group").into_response();
+    }
+
+    ws.on_upgrade(move |mut socket| async move {
+        let mut file_name: String;
+
+        let mut path = "".to_string();
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut file_id: Option<i64> = None;
+
+        while let Some(msg_result) = socket.recv().await {
+            if let Ok(msg) = msg_result {
+                match msg {
+                    Message::Text(text) => {
+                        match text.as_str() {
+                            "finish" => {
+                                if &*path == "" {
+                                    println!("Path should not be empty");
+                                    return;
+                                }
+
+                                if let Err(e) = tokio::fs::write(path, bytes).await {
+                                    println!("Failed to save file with {e:?}");
+                                    // return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to save file")
+                                    //     .into_response();
+                                    //TODO: find a way to return these responses somehow
+                                    return;
+                                } else {
+                                    // return (StatusCode::OK, Json(FileId { file_id })).into_response();
+                                    if file_id.is_some() {
+                                        let tmp = file_id.unwrap().to_le_bytes().to_vec();
+                                        let out: Bytes = Bytes::from(tmp);
+                                        socket.send(Message::Binary(out)).await.unwrap();
+                                    } else {
+                                        println!("File ID was invalid somehow");
+                                    }
+                                    return;
+                                }
+                            }
+                            _ => {
+                                file_name = text.to_string();
+
+                                // insert into DB
+                                // first, initialize channel to connection thread
+                                let (tx, rx) = oneshot::channel();
+
+                                st.tx
+                                    .send(DatabaseCommand::InsertFile {
+                                        group_id: params.group_id,
+                                        filename: file_name,
+                                        responder: tx,
+                                    })
+                                    .await
+                                    .unwrap();
+
+                                // then match result
+                                file_id = match rx.await.unwrap() {
+                                    Ok(file_id) => Some(file_id),
+                                    Err(e) => {
+                                        println!("Failed to insert file with {e:?}");
+
+                                        return;
+                                        // return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to insert file")  //TODO find a way to return these responses
+                                        //     .into_response();
+                                    }
+                                };
+
+                                if file_id.is_none() {
+                                    println!("file_id is not ok");
+                                }
+                                path = to_path(&st.upload_directory, file_id.unwrap());
+                                let _ = socket
+                                    .send(Message::Text(Utf8Bytes::from("Ready for file data")))
+                                    .await;
+                            }
+                        }
+                    }
+
+                    Message::Binary(data) => {
+                        bytes.append(&mut data.to_vec().clone());
+                    }
+
+                    Message::Close(_) => {}
+                    _ => {}
+                }
+            }
+        }
+    })
 }
 
 /// Upload a file

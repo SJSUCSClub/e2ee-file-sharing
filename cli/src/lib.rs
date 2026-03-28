@@ -8,9 +8,10 @@ use std::{
 use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE, Engine as _};
 use corelib::client::{DiskKeys, EncryptedFile, GroupKey, PersonalKey, PkKeyPair};
 use models::*;
-use reqwest::{StatusCode, blocking::multipart};
+use reqwest::StatusCode;
 use rpassword::read_password;
 use rsa::pkcs8::DecodePublicKey;
+use tungstenite::{Bytes, Message, Utf8Bytes};
 
 /// Decrypts the user's private key and fetches their user info from the server
 ///
@@ -447,25 +448,67 @@ pub fn upload(
     let bytes = fs::read(&file)?;
     let encrypted_file = group_key.encrypt_file(&bytes);
 
-    // make request to upload endpoint
-    let file_part = multipart::Part::bytes(postcard::to_allocvec(&encrypted_file)?)
-        .file_name(file.file_name().unwrap().to_str().unwrap().to_string())
-        .mime_str("application/octet-stream")?;
-    let form = multipart::Form::new().part("file", file_part);
-    let resp = client
-        .post(format!(
-            "{server_url}/api/v1/file?group_id={group_id}&user_email={email}&user_password_hash={encoded_password}",
-        ))
-        .multipart(form)
-        .send()?;
-    if !resp.status().is_success() {
-        return Err(Box::from(format!(
-            "Server responded to file upload request with:\nStatus: {}\nResponse: {}",
-            resp.status(),
-            resp.text()?
-        )));
+    //trim the server_url's beginning off
+    let mut flag = false;
+    let url_str_trimmed: String = server_url
+        .chars()
+        .filter(|x| {
+            if *x == ':' {
+                flag = true;
+            }
+            flag
+        })
+        .collect();
+
+    let url_str = format!(
+        "ws{url_str_trimmed}/ws/file-upload?group_id={group_id}&user_email={email}&user_password_hash={encoded_password}"
+    );
+
+    let (mut socket, _) = tungstenite::connect(url_str).expect("Can't connect to WebSocket server");
+
+    // send file name
+    let file_name = file
+        .file_name()
+        .expect("File name is invalid")
+        .to_str()
+        .expect("File name is invalid");
+    let file_name_utf8 = Utf8Bytes::from(file_name);
+    socket
+        .send(Message::Text(file_name_utf8))
+        .expect("Failed to send filename");
+
+    // wait for the server's acknowledgement
+    match socket.read() {
+        Ok(Message::Text(_)) => {}
+        _ => {
+            return Err(Box::new(io::Error::new(
+                io::ErrorKind::Other,
+                "Server improperly acknowledged for file upload",
+            )));
+        }
     }
 
-    let result: FileId = resp.json()?;
-    Ok(result.file_id)
+    let encrypted_file_bytes = postcard::to_allocvec(&encrypted_file)?;
+
+    // stream the file
+    for chunk in encrypted_file_bytes.chunks(1000) {
+        let chunk_owned = chunk.to_vec();
+        socket
+            .send(Message::Binary(Bytes::from(chunk_owned)))
+            .unwrap();
+    }
+
+    let mut tmp: [u8; 8] = [0; 8];
+    socket
+        .send(Message::Text(Utf8Bytes::from("finish")))
+        .unwrap();
+    let file_id_read = socket.read().unwrap().into_data(); //get the file id
+    for (i, b) in file_id_read.iter().enumerate() {
+        tmp[i] = *b;
+    }
+    let file_id = i64::from_le_bytes(tmp);
+
+    socket.send(Message::Close(None)).unwrap();
+
+    Ok(file_id)
 }
