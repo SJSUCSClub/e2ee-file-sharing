@@ -334,12 +334,15 @@ pub mod file_stream_encryption {
 
         /// # Returns
         /// The 8-byte `nonce_start`
-        pub fn get_nonce_start(& self) -> &[u8] {
+        pub fn get_nonce_start(&self) -> &[u8] {
             self.nonce_start.as_slice()
         }
 
         /// Encrypts `bytes` in chunks of size `CHUNK_SIZE` in bytes, using an incrementing nonce.
         /// Panics if it couldn't properly encrypt a chunk.
+        /// 
+        /// # Arguments
+        /// * `bytes` - The entire message to be encrypted.
         /// 
         /// # Returns
         /// An iterator over the encrypted chunks, where a chunk is a `Vec<u8>`.
@@ -358,14 +361,22 @@ pub mod file_stream_encryption {
 
         /// Encrypts a chunk of size `CHUNK_SIZE` in bytes.
         /// 
+        /// # Arguments
+        /// * `bytes` - Chunk to be encrypted.
+        /// * `chunk_ind` - Index of the this chunk relative to the first chunk of the file you are encrypting.
+        /// * `final_chunk` - Whether this is the last chunk to be encrypted for the file you are encrypting.
+        /// 
         /// # Returns
         /// An encrypted chunk as a `Vec<u8>`
-        pub fn encrypt_chunk(&self, bytes : &Vec<u8>, chunk_ind : u32, final_chunk : bool) -> Result<Vec<u8>, aes_gcm::Error> {
+        pub fn encrypt_chunk(&self, bytes : &[u8], chunk_ind : u32, final_chunk : bool) -> Result<Vec<u8>, aes_gcm::Error> {
             encrypt_chunk(&self.cipher, bytes, self.nonce_start, chunk_ind, final_chunk)
         }
 
         /// Decrypts encrypted chunks `encrypted data`.
         /// Panics if it couldn't properly decrypt a chunk.
+        /// 
+        /// # Arguments
+        /// * `encrypted_data` - The file to be decrypted.
         /// 
         /// # Returns
         /// An iterator over the decrypted chunks, where a chunk is a `Vec<u8>`
@@ -379,6 +390,10 @@ pub mod file_stream_encryption {
         }
 
         /// Decrypts a chunk of size `CHUNK_SIZE` + `MAC_SIZE` in bytes.
+        /// 
+        /// # Arguments
+        /// * `encrypted_chunk` - The encrypted chunk to be decrypted.
+        /// * `chunk_ind` - The index of the encrypted chunk relative to the first encrypted chunk of the file.
         /// 
         /// # Returns
         /// In `Ok` variant, the decrypted chunk as a `Vec<u8>`.

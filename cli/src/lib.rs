@@ -459,26 +459,18 @@ fn get_or_create_group(
 /// # Returns
 ///
 /// * `file_id` - the id of the file that was uploaded
-pub fn upload(
+pub fn upload<R: Read>(
     server_url: &str,
     email: &str,
     encoded_password: &str,
     user_id: i64,
     kp: &PkKeyPair,
-    file: PathBuf,
+    mut file: R,
+    file_name: &str,
     group_id: Option<i64>,
     mut emails: Vec<String>,
     mut ids: Vec<i64>,
 ) -> Result<i64, Box<dyn Error>> {
-    // first, double check that the file exists
-    if !file.try_exists()? {
-        return Err(Box::from("File does not exist!"));
-    }
-    // and that it's a file, not a directory
-    if !file.is_file() {
-        return Err(Box::from("Not a file!"));
-    }
-
     // file exists and is a valid file, so now need the recipients
     let client = reqwest::blocking::Client::new();
     // get group id and key
@@ -521,11 +513,6 @@ pub fn upload(
     let (mut socket, _) = tungstenite::connect(url_str).expect("Can't connect to WebSocket server");
 
     // send file name
-    let file_name = file
-        .file_name()
-        .expect("File name is invalid")
-        .to_str()
-        .expect("File name is invalid");
     let file_name_utf8 = Utf8Bytes::from(file_name);
 
     socket
@@ -543,7 +530,6 @@ pub fn upload(
         }
     }
 
-    let bytes = fs::read(&file)?;
     let cipher = group_key.get_cipher();
 
     let fse = FileStreamEncryptor::new(cipher);
@@ -551,9 +537,35 @@ pub fn upload(
     // send nonce_start to the server
     socket.send(Message::Binary(Bytes::from_iter(fse.get_nonce_start().iter().map(|x| *x)))).unwrap();
 
-    // stream the file
-    for chunk in fse.encrypt_bytes_to_chunks(&bytes) {
-        socket.send(Message::Binary(Bytes::from(chunk))).unwrap();
+
+    let mut buf : [u8; CHUNK_SIZE] = [0; CHUNK_SIZE];
+    let mut chunk_ind = 0;
+    
+    // read and stream the file, in chunks of CHUNK_SIZE
+    loop {
+        let mut buf_len = 0;
+        while buf_len < CHUNK_SIZE {
+            let bytes_read = file.read(&mut buf[buf_len..])?;
+            if bytes_read == 0 {
+                break; // hit EOF
+            }
+            buf_len += bytes_read;
+        }
+
+        let is_final = buf_len < CHUNK_SIZE;
+        let chunk_bytes = &buf[..buf_len];
+
+        let encrypted_chunk = fse
+            .encrypt_chunk(&chunk_bytes, chunk_ind, is_final)
+            .map_err(|x| x.to_string())?;
+
+        socket.send(Message::Binary(Bytes::from(encrypted_chunk)))?;
+
+        if is_final {
+            break;
+        }
+
+        chunk_ind += 1;
     }
 
     socket

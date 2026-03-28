@@ -2,9 +2,7 @@ use clap::{Parser, Subcommand};
 use cli::{download, get_user_info, register, upload};
 use rpassword::read_password;
 use std::{
-    env, fs,
-    io::{self, Write},
-    path::PathBuf,
+    env, fs, io::{self, Write}, path::PathBuf
 };
 
 const SERVER_URL: &str = "http://localhost:8000";
@@ -136,13 +134,37 @@ fn main() {
             emails,
             ids,
         } => {
+            match file.try_exists() {
+                Ok(exists) => {
+                    if !exists {
+                        panic!("File does not exist!");
+                    }
+                },
+                Err(e) => {
+                    panic!("File error: {}", e);
+                }
+            }
+            if !file.is_file() {
+                panic!("Not a file!");
+            }
+            let file_name = file
+                .file_name()
+                .expect("File name is invalid")
+                .to_str()
+                .expect("File name is invalid");
+
+            let read_file = std::fs::File::open(&file)
+                .map_err(|x| panic!("Couldn't open file: {}", x))
+                .unwrap();
+
             match upload(
                 SERVER_URL,
                 &args.email,
                 &encoded_password,
                 user_id,
                 &kp,
-                file,
+                read_file,
+                file_name,
                 group_id,
                 emails,
                 ids,
