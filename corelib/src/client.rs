@@ -467,7 +467,7 @@ pub mod file_stream_encryption {
         final_chunk: bool,
     ) -> Result<Vec<u8>, aes_gcm::Error> {
         let mut nonce_bytes: [u8; 12] = [0; 12];
-        nonce_bytes[..8].copy_from_slice(&nonce_start[..8]);
+        nonce_bytes[..8].copy_from_slice(&nonce_start);
         nonce_bytes[8..].copy_from_slice(&chunk_ind.to_be_bytes());
         let nonce = Nonce::from_slice(&nonce_bytes);
 

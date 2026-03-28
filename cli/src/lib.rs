@@ -1,11 +1,11 @@
 use std::{
+    collections::VecDeque,
     error::Error,
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 
-use aes_gcm::{aead::generic_array::iter, aes::cipher};
 use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE, Engine as _};
 use corelib::client::{
     DiskKeys, GroupKey, PersonalKey, PkKeyPair,
@@ -255,7 +255,7 @@ pub fn download(
 
     let fse = FileStreamEncryptor::new_with_nonce_start(cipher, nonce_start);
 
-    let mut buf: Vec<u8> = Vec::new();
+    let mut buf: VecDeque<u8> = VecDeque::new();
     let mut net_chunk: [u8; NETWORK_CHUNK_SIZE] = [0; NETWORK_CHUNK_SIZE];
     let mut curr_ind: u32 = 0;
 
@@ -265,7 +265,7 @@ pub fn download(
             break;
         }
 
-        buf.extend_from_slice(&net_chunk[..bytes_read]);
+        buf.extend(net_chunk[..bytes_read].iter().copied());
 
         while buf.len() > CHUNK_SIZE + MAC_SIZE {
             let chunk: Vec<u8> = buf.drain(..(CHUNK_SIZE + MAC_SIZE)).collect();
@@ -277,7 +277,7 @@ pub fn download(
 
     // potentially, the final chunk is remaining after the loop has finished
     if !buf.is_empty() {
-        let decrypted_bytes = fse.decrypt_chunk(&buf, curr_ind)?;
+        let decrypted_bytes = fse.decrypt_chunk(buf.make_contiguous(), curr_ind)?;
         file.write_all(&decrypted_bytes)?;
     }
 
@@ -557,7 +557,7 @@ pub fn upload<R: Read>(
 
     let mut file_id_bytes: [u8; 8] = [0; 8];
     file_id_bytes.copy_from_slice(&file_id_read);
-    let file_id = i64::from_le_bytes(file_id_bytes);
+    let file_id = i64::from_be_bytes(file_id_bytes);
 
     socket.send(Message::Close(None)).unwrap();
 
