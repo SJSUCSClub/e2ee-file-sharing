@@ -243,26 +243,6 @@ pub fn download(
         )));
     }
 
-    // get bytes
-    // let bytes = resp.bytes()?;
-    // if bytes.len() < 8 {
-    //     return Err(Box::from("Response size too small"));
-    // }
-
-    // let nonce_start: [u8; 8] = bytes[0..8].try_into().unwrap();
-    // let encrypted_data = &bytes[8..];
-
-    // let cipher = group_key.get_cipher();
-    // let mut decrypted_file = Vec::new();
-
-    // let fse = FileStreamEncryptor::new_with_nonce_start(cipher, nonce_start);
-
-    // for chunk in fse.decrypt_chunks_to_iter(encrypted_data) {
-    //     decrypted_file.extend_from_slice(&chunk);
-    // }
-
-    // Ok(fs::write(&output_path, decrypted_file)?)
-
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -270,14 +250,14 @@ pub fn download(
 
     let cipher = group_key.get_cipher();
 
-    let mut nonce_start : [u8; 8] = [0; 8];
+    let mut nonce_start: [u8; 8] = [0; 8];
     resp.read_exact(&mut nonce_start)?;
 
     let fse = FileStreamEncryptor::new_with_nonce_start(cipher, nonce_start);
 
-    let mut buf : Vec<u8> = Vec::new();
-    let mut net_chunk : [u8; NETWORK_CHUNK_SIZE] = [0; NETWORK_CHUNK_SIZE];
-    let mut curr_ind : u32 = 0;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut net_chunk: [u8; NETWORK_CHUNK_SIZE] = [0; NETWORK_CHUNK_SIZE];
+    let mut curr_ind: u32 = 0;
 
     loop {
         let bytes_read = resp.read(&mut net_chunk)?;
@@ -288,12 +268,11 @@ pub fn download(
         buf.extend_from_slice(&net_chunk[..bytes_read]);
 
         while buf.len() > CHUNK_SIZE + MAC_SIZE {
-            let chunk : Vec<u8> = buf.drain(..(CHUNK_SIZE + MAC_SIZE)).collect();
+            let chunk: Vec<u8> = buf.drain(..(CHUNK_SIZE + MAC_SIZE)).collect();
             let decrypted_chunk = fse.decrypt_chunk(chunk.as_slice(), curr_ind)?;
             file.write_all(&decrypted_chunk)?;
             curr_ind += 1;
         }
-
     }
 
     // potentially, the final chunk is remaining after the loop has finished
@@ -450,7 +429,7 @@ fn get_or_create_group(
 /// * `encoded_password` - the base64-encoded password of the user
 /// * `user_id` - the id of the user
 /// * `kp` - the keypair of the user
-/// * `file` - the path to the file to upload
+/// * `file` - the file as a stream that implements `Read`
 /// * `group_id` - the id of the group to upload the file to, if any.
 /// This takes priority over the recipient (email/id) list.
 /// * `emails` - the emails of the recipients to send the file to, excluding the current user.
@@ -535,12 +514,15 @@ pub fn upload<R: Read>(
     let fse = FileStreamEncryptor::new(cipher);
 
     // send nonce_start to the server
-    socket.send(Message::Binary(Bytes::from_iter(fse.get_nonce_start().iter().map(|x| *x)))).unwrap();
+    socket
+        .send(Message::Binary(Bytes::from_iter(
+            fse.get_nonce_start().iter().map(|x| *x),
+        )))
+        .unwrap();
 
-
-    let mut buf : [u8; CHUNK_SIZE] = [0; CHUNK_SIZE];
+    let mut buf: [u8; CHUNK_SIZE] = [0; CHUNK_SIZE];
     let mut chunk_ind = 0;
-    
+
     // read and stream the file, in chunks of CHUNK_SIZE
     loop {
         let mut buf_len = 0;

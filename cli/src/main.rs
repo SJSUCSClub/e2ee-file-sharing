@@ -2,7 +2,9 @@ use clap::{Parser, Subcommand};
 use cli::{download, get_user_info, register, upload};
 use rpassword::read_password;
 use std::{
-    env, fs, io::{self, Write}, path::PathBuf
+    env, fs,
+    io::{self, Write},
+    path::PathBuf,
 };
 
 const SERVER_URL: &str = "http://localhost:8000";
@@ -139,7 +141,7 @@ fn main() {
                     if !exists {
                         panic!("File does not exist!");
                     }
-                },
+                }
                 Err(e) => {
                     panic!("File error: {}", e);
                 }
