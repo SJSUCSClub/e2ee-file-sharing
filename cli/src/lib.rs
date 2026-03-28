@@ -1,12 +1,16 @@
 use std::{
+    collections::VecDeque,
     error::Error,
-    fs,
-    io::{self, Write},
+    fs::{self, OpenOptions},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 
 use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE, Engine as _};
-use corelib::client::{DiskKeys, EncryptedFile, GroupKey, PersonalKey, PkKeyPair};
+use corelib::client::{
+    DiskKeys, GroupKey, PersonalKey, PkKeyPair,
+    file_stream_encryption::{CHUNK_SIZE, FileStreamEncryptor, MAC_SIZE, NETWORK_CHUNK_SIZE},
+};
 use models::*;
 use reqwest::StatusCode;
 use rpassword::read_password;
@@ -226,7 +230,7 @@ pub fn download(
     )?;
 
     // make request to file endpoint
-    let resp = client
+    let mut resp = client
         .get(format!(
             "{server_url}/api/v1/file?file_id={file_id}&user_email={email}&user_password_hash={encoded_password}",
         ))
@@ -239,12 +243,45 @@ pub fn download(
         )));
     }
 
-    // decrypt bytes
-    let bytes = resp.bytes()?;
-    let encrypted_file: EncryptedFile = postcard::from_bytes(&bytes)?;
-    let bytes = group_key.decrypt_file(&encrypted_file);
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&output_path)?;
 
-    Ok(fs::write(&output_path, bytes)?)
+    let cipher = group_key.get_cipher();
+
+    let mut nonce_start: [u8; 8] = [0; 8];
+    resp.read_exact(&mut nonce_start)?;
+
+    let fse = FileStreamEncryptor::new_with_nonce_start(cipher, nonce_start);
+
+    let mut buf: VecDeque<u8> = VecDeque::new();
+    let mut net_chunk: [u8; NETWORK_CHUNK_SIZE] = [0; NETWORK_CHUNK_SIZE];
+    let mut curr_ind: u32 = 0;
+
+    loop {
+        let bytes_read = resp.read(&mut net_chunk)?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        buf.extend(net_chunk[..bytes_read].iter().copied());
+
+        while buf.len() > CHUNK_SIZE + MAC_SIZE {
+            let chunk: Vec<u8> = buf.drain(..(CHUNK_SIZE + MAC_SIZE)).collect();
+            let decrypted_chunk = fse.decrypt_chunk(chunk.as_slice(), curr_ind)?;
+            file.write_all(&decrypted_chunk)?;
+            curr_ind += 1;
+        }
+    }
+
+    // potentially, the final chunk is remaining after the loop has finished
+    if !buf.is_empty() {
+        let decrypted_bytes = fse.decrypt_chunk(buf.make_contiguous(), curr_ind)?;
+        file.write_all(&decrypted_bytes)?;
+    }
+
+    Ok(())
 }
 
 /// Creates a group on the server and returns the group id
@@ -392,7 +429,7 @@ fn get_or_create_group(
 /// * `encoded_password` - the base64-encoded password of the user
 /// * `user_id` - the id of the user
 /// * `kp` - the keypair of the user
-/// * `file` - the path to the file to upload
+/// * `file` - the file as a stream that implements `Read`
 /// * `group_id` - the id of the group to upload the file to, if any.
 /// This takes priority over the recipient (email/id) list.
 /// * `emails` - the emails of the recipients to send the file to, excluding the current user.
@@ -401,26 +438,18 @@ fn get_or_create_group(
 /// # Returns
 ///
 /// * `file_id` - the id of the file that was uploaded
-pub fn upload(
+pub fn upload<R: Read>(
     server_url: &str,
     email: &str,
     encoded_password: &str,
     user_id: i64,
     kp: &PkKeyPair,
-    file: PathBuf,
+    mut file: R,
+    file_name: &str,
     group_id: Option<i64>,
     mut emails: Vec<String>,
     mut ids: Vec<i64>,
 ) -> Result<i64, Box<dyn Error>> {
-    // first, double check that the file exists
-    if !file.try_exists()? {
-        return Err(Box::from("File does not exist!"));
-    }
-    // and that it's a file, not a directory
-    if !file.is_file() {
-        return Err(Box::from("Not a file!"));
-    }
-
     // file exists and is a valid file, so now need the recipients
     let client = reqwest::blocking::Client::new();
     // get group id and key
@@ -444,10 +473,6 @@ pub fn upload(
     // get the group key
     let group_key = get_group_key(server_url, email, encoded_password, group_id, kp, &client)?;
 
-    // encrypt file
-    let bytes = fs::read(&file)?;
-    let encrypted_file = group_key.encrypt_file(&bytes);
-
     //trim the server_url's beginning off
     let mut flag = false;
     let url_str_trimmed: String = server_url
@@ -467,12 +492,8 @@ pub fn upload(
     let (mut socket, _) = tungstenite::connect(url_str).expect("Can't connect to WebSocket server");
 
     // send file name
-    let file_name = file
-        .file_name()
-        .expect("File name is invalid")
-        .to_str()
-        .expect("File name is invalid");
     let file_name_utf8 = Utf8Bytes::from(file_name);
+
     socket
         .send(Message::Text(file_name_utf8))
         .expect("Failed to send filename");
@@ -488,25 +509,55 @@ pub fn upload(
         }
     }
 
-    let encrypted_file_bytes = postcard::to_allocvec(&encrypted_file)?;
+    let cipher = group_key.get_cipher();
 
-    // stream the file
-    for chunk in encrypted_file_bytes.chunks(1000) {
-        let chunk_owned = chunk.to_vec();
-        socket
-            .send(Message::Binary(Bytes::from(chunk_owned)))
-            .unwrap();
+    let fse = FileStreamEncryptor::new(cipher);
+
+    // send nonce_start to the server
+    socket
+        .send(Message::Binary(Bytes::from_iter(
+            fse.get_nonce_start().iter().map(|x| *x),
+        )))
+        .unwrap();
+
+    let mut buf: [u8; CHUNK_SIZE] = [0; CHUNK_SIZE];
+    let mut chunk_ind = 0;
+
+    // read and stream the file, in chunks of CHUNK_SIZE
+    loop {
+        let mut buf_len = 0;
+        while buf_len < CHUNK_SIZE {
+            let bytes_read = file.read(&mut buf[buf_len..])?;
+            if bytes_read == 0 {
+                break; // hit EOF
+            }
+            buf_len += bytes_read;
+        }
+
+        let is_final = buf_len < CHUNK_SIZE;
+        let chunk_bytes = &buf[..buf_len];
+
+        let encrypted_chunk = fse
+            .encrypt_chunk(&chunk_bytes, chunk_ind, is_final)
+            .map_err(|x| x.to_string())?;
+
+        socket.send(Message::Binary(Bytes::from(encrypted_chunk)))?;
+
+        if is_final {
+            break;
+        }
+
+        chunk_ind += 1;
     }
 
-    let mut tmp: [u8; 8] = [0; 8];
     socket
         .send(Message::Text(Utf8Bytes::from("finish")))
         .unwrap();
     let file_id_read = socket.read().unwrap().into_data(); //get the file id
-    for (i, b) in file_id_read.iter().enumerate() {
-        tmp[i] = *b;
-    }
-    let file_id = i64::from_le_bytes(tmp);
+
+    let mut file_id_bytes: [u8; 8] = [0; 8];
+    file_id_bytes.copy_from_slice(&file_id_read);
+    let file_id = i64::from_be_bytes(file_id_bytes);
 
     socket.send(Message::Close(None)).unwrap();
 

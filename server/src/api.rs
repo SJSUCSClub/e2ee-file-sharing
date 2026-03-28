@@ -353,7 +353,7 @@ pub(crate) async fn ws_file_upload(
                                 } else {
                                     // return (StatusCode::OK, Json(FileId { file_id })).into_response();
                                     if file_id.is_some() {
-                                        let tmp = file_id.unwrap().to_le_bytes().to_vec();
+                                        let tmp = file_id.unwrap().to_be_bytes().to_vec();
                                         let out: Bytes = Bytes::from(tmp);
                                         socket.send(Message::Binary(out)).await.unwrap();
                                     } else {
