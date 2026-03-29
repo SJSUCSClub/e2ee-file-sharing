@@ -171,7 +171,7 @@ fn get_group_key(
 
 /// Downloads a file from the server by using
 /// the provided id and decrypts it using the user's private key
-/// and the group's key, saving it to the provided path.
+/// and the group's key, saving it to the provided path or stdout.
 /// If no path is provided, the file will be saved as the file name provided by the server.
 /// Returns an error if the file already exists.
 ///
@@ -183,6 +183,7 @@ fn get_group_key(
 /// * `kp` - the key pair of the user
 /// * `file_id` - the id of the file to download
 /// * `output` - the path to save the file to
+/// * `stdout` - whether to output to stdout
 pub fn download(
     server_url: &str,
     email: &str,
@@ -437,6 +438,7 @@ fn get_or_create_group(
 /// * `user_id` - the id of the user
 /// * `kp` - the keypair of the user
 /// * `file` - the file as a stream that implements `Read`
+/// * `file_name` - the file name
 /// * `group_id` - the id of the group to upload the file to, if any.
 /// This takes priority over the recipient (email/id) list.
 /// * `emails` - the emails of the recipients to send the file to, excluding the current user.
