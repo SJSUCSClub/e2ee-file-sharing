@@ -2,8 +2,9 @@ use clap::{Parser, Subcommand};
 use cli::{download, get_user_info, register, upload};
 use rpassword::read_password;
 use std::{
-    env, fs,
-    io::{self, Write},
+    env,
+    fs::{self, File},
+    io::{self, BufReader, Read, Write},
     path::PathBuf,
 };
 
@@ -35,10 +36,16 @@ enum Subcommands {
         /// If not specified, the file will be saved as the filename provided by the server
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Whether to output to stdout (instead of a file)
+        /// Ignored if --output is specified
+        #[arg(short, long)]
+        stdout: bool,
     },
     /// Encrypt and upload a file to the server
     Upload {
         /// The file to upload
+        /// When --stdin is used, this will essentially provide
+        /// a name for the file input being piped in
         file: PathBuf,
         /// The ID of the group to upload the file to
         /// This takes priority over the recipient (email/id) list
@@ -55,9 +62,15 @@ enum Subcommands {
         /// The order of the ids must match the order of the emails
         #[arg(short, long, value_delimiter = ',')]
         ids: Vec<i64>,
+        /// Whether to use stdin as input
+        /// If this is true, the file argument is ignored
+        #[arg(short, long)]
+        stdin: bool,
     },
 }
 
+// User-facing output should go in stderr, since the user
+// can choose to output to stdout when downloading
 fn main() {
     let args = Cli::parse();
 
@@ -88,8 +101,8 @@ fn main() {
 
     // get password
     let password = args.password.unwrap_or_else(|| {
-        print!("Password: ");
-        io::stdout().flush().unwrap();
+        eprint!("Password: ");
+        io::stderr().flush().unwrap();
         read_password().unwrap()
     });
 
@@ -97,9 +110,9 @@ fn main() {
     // before the others since the user SHOULDN'T exist yet
     if let Subcommands::Register {} = args.command {
         if let Err(e) = register(SERVER_URL, &args.email, &password, disk_key_path) {
-            println!("Failed to register: {e}");
+            eprintln!("Failed to register: {e}");
         } else {
-            println!("Registration successful!");
+            eprintln!("Registration successful!");
         }
         return;
     }
@@ -109,14 +122,18 @@ fn main() {
         match get_user_info(SERVER_URL, &args.email, &password, disk_key_path) {
             Ok((kp, encoded_password, user_id)) => (kp, encoded_password, user_id),
             Err(e) => {
-                println!("Failed to get user info: {e}");
+                eprintln!("Failed to get user info: {e}");
                 return;
             }
         };
 
     // now handle the individual command
     match args.command {
-        Subcommands::Download { file_id, output } => {
+        Subcommands::Download {
+            file_id,
+            output,
+            stdout,
+        } => {
             if let Err(e) = download(
                 SERVER_URL,
                 &args.email,
@@ -124,10 +141,11 @@ fn main() {
                 &kp,
                 file_id,
                 output,
+                stdout,
             ) {
-                println!("Failed to download file: {e}");
+                eprintln!("Failed to download file: {e}");
             } else {
-                println!("Download successful!");
+                eprintln!("Download successful!");
             }
         }
         Subcommands::Upload {
@@ -135,29 +153,15 @@ fn main() {
             group_id,
             emails,
             ids,
+            stdin,
         } => {
-            match file.try_exists() {
-                Ok(exists) => {
-                    if !exists {
-                        panic!("File does not exist!");
-                    }
-                }
-                Err(e) => {
-                    panic!("File error: {}", e);
-                }
-            }
-            if !file.is_file() {
-                panic!("Not a file!");
-            }
-            let file_name = file
-                .file_name()
-                .expect("File name is invalid")
-                .to_str()
-                .expect("File name is invalid");
-
-            let read_file = std::fs::File::open(&file)
-                .map_err(|x| panic!("Couldn't open file: {}", x))
-                .unwrap();
+            let (read_stream, file_name): (Box<dyn Read>, String) = if stdin {
+                let stream_in = Box::new(BufReader::new(std::io::stdin()));
+                (stream_in, get_file_name_as_string(file))
+            } else {
+                let tmp = take_file_input(file);
+                (Box::new(tmp.0), tmp.1)
+            };
 
             match upload(
                 SERVER_URL,
@@ -165,19 +169,50 @@ fn main() {
                 &encoded_password,
                 user_id,
                 &kp,
-                read_file,
-                file_name,
+                read_stream,
+                &file_name,
                 group_id,
                 emails,
                 ids,
             ) {
                 Ok(file_id) => {
-                    println!("Upload successful!");
-                    println!("File ID: {file_id}");
+                    eprintln!("Upload successful!");
+                    eprintln!("File ID: {file_id}");
                 }
-                Err(e) => println!("Failed to upload file: {e}"),
+                Err(e) => eprintln!("Failed to upload file: {e}"),
             }
         }
         Subcommands::Register {} => unreachable!(),
     }
+}
+
+fn take_file_input(file: PathBuf) -> (File, String) {
+    match file.try_exists() {
+        Ok(exists) => {
+            if !exists {
+                panic!("File does not exist!");
+            }
+        }
+        Err(e) => {
+            panic!("File error: {}", e);
+        }
+    }
+    if !file.is_file() {
+        panic!("Not a file!");
+    }
+    let file_name = file
+        .file_name()
+        .expect("File name is invalid")
+        .to_str()
+        .expect("File name is invalid");
+
+    let read_file = std::fs::File::open(&file)
+        .map_err(|x| panic!("Couldn't open file: {}", x))
+        .unwrap();
+
+    (read_file, file_name.to_string())
+}
+
+fn get_file_name_as_string(file: PathBuf) -> String {
+    file.file_name().unwrap().to_str().unwrap().to_string()
 }
