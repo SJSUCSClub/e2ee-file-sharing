@@ -2,7 +2,7 @@ use std::{
     collections::VecDeque,
     error::Error,
     fs::{self, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, BufWriter, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -77,8 +77,8 @@ pub fn register(
     disk_key_path: &Path,
 ) -> Result<(), Box<dyn Error>> {
     // confirm password
-    print!("Confirm password: ");
-    io::stdout().flush()?;
+    eprint!("Confirm password: ");
+    io::stderr().flush()?;
     if password != read_password()? {
         return Err(Box::from("Passwords do not match"));
     }
@@ -93,7 +93,7 @@ pub fn register(
 
     // no key, so let's create one
     // create our personal_key and keypair
-    println!("Registering user...");
+    eprintln!("Registering user...");
     let personal_key = PersonalKey::derive(email, password);
     let kp = PkKeyPair::new();
     let pk_pub = kp.get_public_key_pem()?;
@@ -171,7 +171,7 @@ fn get_group_key(
 
 /// Downloads a file from the server by using
 /// the provided id and decrypts it using the user's private key
-/// and the group's key, saving it to the provided path.
+/// and the group's key, saving it to the provided path or stdout.
 /// If no path is provided, the file will be saved as the file name provided by the server.
 /// Returns an error if the file already exists.
 ///
@@ -183,6 +183,7 @@ fn get_group_key(
 /// * `kp` - the key pair of the user
 /// * `file_id` - the id of the file to download
 /// * `output` - the path to save the file to
+/// * `stdout` - whether to output to stdout
 pub fn download(
     server_url: &str,
     email: &str,
@@ -190,6 +191,7 @@ pub fn download(
     kp: &PkKeyPair,
     file_id: i64,
     output: Option<PathBuf>,
+    stdout: bool,
 ) -> Result<(), Box<dyn Error>> {
     let client = reqwest::blocking::Client::new();
     // make request to file info endpoint
@@ -207,14 +209,24 @@ pub fn download(
     }
     // parse the response
     let info: FileInfo = resp.json()?;
-    let output_path = match output {
-        Some(path) => path,
+    let mut output_stream: Box<dyn Write> = match output {
+        Some(path) => {
+            if stdout {
+                eprintln!("--stdout ignored because --output was specified");
+            }
+            Box::new(OpenOptions::new().create(true).append(true).open(&path)?)
+        }
         None => {
-            let result = fs::exists(&info.file_name)?;
-            if result {
-                return Err(Box::from("File already exists!"));
+            if stdout {
+                Box::new(BufWriter::new(std::io::stdout()))
             } else {
-                PathBuf::from(&info.file_name)
+                let result = fs::exists(&info.file_name)?;
+                if result {
+                    return Err(Box::from("File already exists!"));
+                } else {
+                    let tmp = PathBuf::from(&info.file_name);
+                    Box::new(OpenOptions::new().create(true).append(true).open(&tmp)?)
+                }
             }
         }
     };
@@ -243,11 +255,6 @@ pub fn download(
         )));
     }
 
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&output_path)?;
-
     let cipher = group_key.get_cipher();
 
     let mut nonce_start: [u8; 8] = [0; 8];
@@ -270,7 +277,7 @@ pub fn download(
         while buf.len() > CHUNK_SIZE + MAC_SIZE {
             let chunk: Vec<u8> = buf.drain(..(CHUNK_SIZE + MAC_SIZE)).collect();
             let decrypted_chunk = fse.decrypt_chunk(chunk.as_slice(), curr_ind)?;
-            file.write_all(&decrypted_chunk)?;
+            output_stream.write_all(&decrypted_chunk)?;
             curr_ind += 1;
         }
     }
@@ -278,9 +285,10 @@ pub fn download(
     // potentially, the final chunk is remaining after the loop has finished
     if !buf.is_empty() {
         let decrypted_bytes = fse.decrypt_chunk(buf.make_contiguous(), curr_ind)?;
-        file.write_all(&decrypted_bytes)?;
+        output_stream.write_all(&decrypted_bytes)?;
     }
 
+    output_stream.flush()?;
     Ok(())
 }
 
@@ -430,6 +438,7 @@ fn get_or_create_group(
 /// * `user_id` - the id of the user
 /// * `kp` - the keypair of the user
 /// * `file` - the file as a stream that implements `Read`
+/// * `file_name` - the file name
 /// * `group_id` - the id of the group to upload the file to, if any.
 /// This takes priority over the recipient (email/id) list.
 /// * `emails` - the emails of the recipients to send the file to, excluding the current user.
