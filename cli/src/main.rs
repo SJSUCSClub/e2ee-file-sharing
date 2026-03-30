@@ -63,7 +63,6 @@ enum Subcommands {
         #[arg(short, long, value_delimiter = ',')]
         ids: Vec<i64>,
         /// Whether to use stdin as input
-        /// If this is true, the file argument is ignored
         #[arg(short, long)]
         stdin: bool,
     },
