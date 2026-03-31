@@ -309,17 +309,17 @@ pub fn download(
 fn create_group(
     server_url: &str,
     email: &str,
+    emails: &Vec<String>,
     encoded_password: &str,
-    ids: Vec<i64>,
-    members: GroupMembers,
+    members: GroupMembersOnlyEmail,
     client: &reqwest::blocking::Client,
 ) -> Result<i64, Box<dyn Error>> {
     // need to make a group
     // get every pkpub for each user
     let mut pkpubs = Vec::new();
-    for id in ids {
+    for email_i in emails {
         let resp = client.get(format!(
-                        "{server_url}/api/v1/user/key?target_user_id={id}&user_email={email}&user_password_hash={encoded_password}",
+                        "{server_url}/api/v1/user/key?target_user_email={email_i}&user_email={email}&user_password_hash={encoded_password}",
                     )).send()?;
         if !resp.status().is_success() {
             return Err(Box::from(format!(
@@ -343,7 +343,6 @@ fn create_group(
         .zip(group.into_iter())
         .map(|(m, key)| UserWithKey {
             user_email: m.user_email,
-            user_id: m.user_id,
             key: BASE64_STANDARD.encode(key),
         })
         .collect();
@@ -373,7 +372,6 @@ fn create_group(
 /// * `server_url` - the url of the server
 /// * `email` - the email of the user
 /// * `encoded_password` - the base64-encoded password of the user
-/// * `ids` - the ids of the users to add to the group
 /// * `emails` - the emails of the users to add to the group
 /// * `client` - the client to use to make requests
 ///
@@ -384,19 +382,17 @@ fn get_or_create_group(
     server_url: &str,
     email: &str,
     encoded_password: &str,
-    ids: Vec<i64>,
     emails: Vec<String>,
     client: &reqwest::blocking::Client,
 ) -> Result<i64, Box<dyn Error>> {
     // put emails and ids together
     let mut members = Vec::new();
-    for (email, id) in emails.into_iter().zip(ids.iter()) {
-        members.push(User {
-            user_email: email,
-            user_id: *id,
+    for email in &emails {
+        members.push(UserEmail {
+            user_email: email.clone(),
         });
     }
-    let members = GroupMembers { members };
+    let members = GroupMembersOnlyEmail { members };
 
     // make request to group endpoint
     let resp = client
@@ -410,8 +406,8 @@ fn get_or_create_group(
         Ok(create_group(
             server_url,
             email,
+            &emails,
             encoded_password,
-            ids,
             members,
             &client,
         )?)
@@ -451,13 +447,11 @@ pub fn upload<R: Read>(
     server_url: &str,
     email: &str,
     encoded_password: &str,
-    user_id: i64,
     kp: &PkKeyPair,
     mut file: R,
     file_name: &str,
     group_id: Option<i64>,
     mut emails: Vec<String>,
-    mut ids: Vec<i64>,
 ) -> Result<i64, Box<dyn Error>> {
     // file exists and is a valid file, so now need the recipients
     let client = reqwest::blocking::Client::new();
@@ -465,16 +459,11 @@ pub fn upload<R: Read>(
     let group_id = match group_id {
         Some(id) => id,
         None => {
-            // need to compute it from the given recipients
-            if emails.len() != ids.len() {
-                return Err(Box::from("Emails and ids must be the same length"));
-            }
             // add ourself to the list
             emails.push(email.to_string());
-            ids.push(user_id);
 
             // get group id from server
-            get_or_create_group(server_url, email, encoded_password, ids, emails, &client)?
+            get_or_create_group(server_url, email, encoded_password, emails, &client)?
         }
     };
 
