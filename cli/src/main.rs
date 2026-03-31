@@ -1,3 +1,33 @@
+/*
+
+
+
+
+
+
+
+
+
+
+
+
+DELETE BEFORE COMMITTING!!!!!!
+Todo: apply rate limiting when a user is spamming shared uploads (or even, just spamming just uploads in general?)
+
+
+
+
+
+
+
+
+
+
+
+
+
+*/
+
 use clap::{Parser, Subcommand};
 use cli::{download, get_user_info, register, upload};
 use rpassword::read_password;

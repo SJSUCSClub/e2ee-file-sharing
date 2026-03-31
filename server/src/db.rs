@@ -173,10 +173,7 @@ pub fn get_user_id(
 ///
 /// A `Result` containing the user ID as an `i64` if the user is found, or an
 /// error if the user cannot be found or a database error occurs.
-pub fn get_user_id_from_email(
-    Database { conn }: &Database,
-    user_email: &str,
-) -> Result<i64> {
+pub fn get_user_id_from_email(Database { conn }: &Database, user_email: &str) -> Result<i64> {
     let query = "
         SELECT id FROM users WHERE email = ?;
     ";
