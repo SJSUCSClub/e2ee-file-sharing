@@ -1,5 +1,6 @@
 mod api;
 mod db;
+mod constants;
 
 use api::{HandlerState, connection_task};
 use axum::middleware;
@@ -12,8 +13,6 @@ use crate::db::Database;
 use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
 use utoipa::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
-
-const DEVELOPMENT_MODE: bool = true;
 
 #[derive(OpenApi)]
 #[openapi(info(
@@ -51,7 +50,7 @@ async fn main() {
     // rate limiters for streamed file upload
     let email_config = Arc::new(
         GovernorConfigBuilder::default()
-            .per_millisecond(2000) // 1 token per 2s = 5 per 10s
+            .per_millisecond(constants::UPLOAD_RATE_LIMIT_EMAIL_REPLENISH_TIME) // 1 token per 2s = 5 per 10s
             .burst_size(5)
             .key_extractor(api::UserEmailExtractor)
             .finish()
@@ -60,7 +59,7 @@ async fn main() {
 
     let ip_config = Arc::new(
         GovernorConfigBuilder::default()
-            .per_millisecond(1000) // 1 token per 1s = 10 per 10s
+            .per_millisecond(constants::UPLOAD_RATE_LIMIT_IP_REPLENISH_TIME) // 1 token per 1s = 10 per 10s
             .burst_size(10)
             .finish()
             .unwrap(),
@@ -72,7 +71,7 @@ async fn main() {
         .split_for_parts();
 
     let ws_app = ws_app.layer(GovernorLayer::new(email_config));
-    let ws_app = if !DEVELOPMENT_MODE {
+    let ws_app = if !constants::DEVELOPMENT_MODE {
         ws_app.layer(GovernorLayer::new(ip_config))
     } else {
         ws_app

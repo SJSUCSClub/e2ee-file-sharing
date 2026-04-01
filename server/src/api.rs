@@ -22,7 +22,7 @@ use tokio::sync::{
 use tokio_util::io::ReaderStream;
 use tower_governor::{errors::GovernorError, key_extractor::KeyExtractor};
 
-use crate::db::{self, Database, get_user_id_from_email};
+use crate::db::{self, Database};
 
 // ==============================
 // Misc
@@ -1886,7 +1886,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(&body[..], b"Not all users exist");
+        assert_eq!(&body[..], b"Not all users exist or invalid key encoding");
 
         // try when user not present
         let request_body = GroupMembersWithKey {
