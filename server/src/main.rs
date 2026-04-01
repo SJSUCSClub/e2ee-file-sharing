@@ -24,6 +24,9 @@ struct ApiDoc;
 
 #[tokio::main]
 async fn main() {
+    constants::set_dev_mode();
+    let dev_mode = constants::DEVELOPMENT_MODE.get().unwrap();
+
     // make db
     let db_filename = env::var("DATABASE").unwrap_or("e2ee-file-sharing.db".to_string());
     let mut db = Database::open(&db_filename).expect("Failed to open db");
@@ -71,7 +74,7 @@ async fn main() {
         .split_for_parts();
 
     let ws_app = ws_app.layer(GovernorLayer::new(email_config));
-    let ws_app = if !constants::DEVELOPMENT_MODE {
+    let ws_app = if !dev_mode {
         ws_app.layer(GovernorLayer::new(ip_config))
     } else {
         ws_app
