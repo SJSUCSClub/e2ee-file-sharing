@@ -11,17 +11,17 @@ pub(crate) const UPLOAD_RATE_LIMIT_IP_REPLENISH_TIME: u64 = 1000;
 
 pub(crate) fn set_dev_mode() {
     let development_mode = match std::env::var("EFS_SERVER_DEVELOPMENT_MODE") {
-        Ok(variable) => {
-            match variable.as_ref() {
-                "1" => {
-                    println!("DEVELOPMENT_MODE is enabled");
-                    true
-                },
-                _ => false
+        Ok(variable) => match variable.as_ref() {
+            "1" => {
+                println!("DEVELOPMENT_MODE is enabled");
+                true
             }
+            _ => false,
         },
         Err(_) => {
-            println!("Environment variable 'EFS_SERVER_DEVELOPMENT_MODE' is not set, defaulting to false");
+            println!(
+                "Environment variable 'EFS_SERVER_DEVELOPMENT_MODE' is not set, defaulting to false"
+            );
             false
         }
     };
