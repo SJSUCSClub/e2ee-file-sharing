@@ -13,7 +13,7 @@ use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
 use utoipa::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-const DEVELOPMENT_MODE: bool = false;
+const DEVELOPMENT_MODE: bool = true;
 
 #[derive(OpenApi)]
 #[openapi(info(
