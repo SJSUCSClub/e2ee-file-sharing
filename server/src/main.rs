@@ -1,6 +1,6 @@
 mod api;
-mod db;
 mod constants;
+mod db;
 
 use api::{HandlerState, connection_task};
 use axum::middleware;
