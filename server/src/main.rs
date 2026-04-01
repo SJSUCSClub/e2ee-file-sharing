@@ -1,4 +1,5 @@
 mod api;
+mod constants;
 mod db;
 
 use api::{HandlerState, connection_task};
@@ -9,6 +10,7 @@ use tower_http::trace::TraceLayer;
 use tracing::Level;
 
 use crate::db::Database;
+use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
 use utoipa::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
@@ -22,6 +24,9 @@ struct ApiDoc;
 
 #[tokio::main]
 async fn main() {
+    constants::set_dev_mode();
+    let dev_mode = constants::DEVELOPMENT_MODE.get().unwrap();
+
     // make db
     let db_filename = env::var("DATABASE").unwrap_or("e2ee-file-sharing.db".to_string());
     let mut db = Database::open(&db_filename).expect("Failed to open db");
@@ -43,12 +48,41 @@ async fn main() {
     let _ = tokio::spawn(connection_task(db, rx));
 
     // make app
-    // but in two parts, one for endpoints requiring auth
-    // and one for those that don't
-    let (auth_app, auth_openapi) = OpenApiRouter::with_openapi(ApiDoc::openapi())
+    // but in three parts: upload with rate limit, auth, and unauth
+
+    // rate limiters for streamed file upload
+    let email_config = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_millisecond(constants::UPLOAD_RATE_LIMIT_EMAIL_REPLENISH_TIME) // 1 token per 2s = 5 per 10s
+            .burst_size(5)
+            .key_extractor(api::UserEmailExtractor)
+            .finish()
+            .unwrap(),
+    );
+
+    let ip_config = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_millisecond(constants::UPLOAD_RATE_LIMIT_IP_REPLENISH_TIME) // 1 token per 1s = 10 per 10s
+            .burst_size(10)
+            .finish()
+            .unwrap(),
+    );
+
+    let (ws_app, ws_openapi) = OpenApiRouter::new()
+        .routes(routes!(api::ws_file_upload))
+        .with_state(state.clone())
+        .split_for_parts();
+
+    let ws_app = ws_app.layer(GovernorLayer::new(email_config));
+    let ws_app = if !dev_mode {
+        ws_app.layer(GovernorLayer::new(ip_config))
+    } else {
+        ws_app
+    };
+
+    let (others_app, others_openapi) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(api::list_files))
         .routes(routes!(api::get_file))
-        .routes(routes!(api::ws_file_upload))
         .routes(routes!(api::upload_file))
         .routes(routes!(api::get_file_info))
         .routes(routes!(api::get_user_info))
@@ -58,12 +92,19 @@ async fn main() {
         .routes(routes!(api::get_group_by_members))
         .routes(routes!(api::create_group))
         .routes(routes!(api::list_groups))
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            api::user_auth,
-        ))
         .with_state(state.clone())
         .split_for_parts();
+
+    // re-merge auth apps and apply user_auth to all of them
+    let auth_app = others_app.merge(ws_app);
+    let auth_openapi = others_openapi.merge_from(ws_openapi);
+
+    // apply auth middleware to all routes that need it
+    let auth_app = auth_app.route_layer(middleware::from_fn_with_state(
+        state.clone(),
+        api::user_auth,
+    ));
+
     let (unauth_app, unauth_openapi) = OpenApiRouter::new()
         .routes(routes!(api::register_user))
         .with_state(state)

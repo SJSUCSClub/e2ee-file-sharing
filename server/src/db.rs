@@ -159,6 +159,28 @@ pub fn get_user_id(
     statement.query_row(params![user_email, hashed_password], |row| row.get(0))
 }
 
+/// Retrieves the user ID from the database from a given email.
+///
+/// This function queries the `users` table to find a user with the specified
+/// email. If a match is found, the user ID is returned.
+///
+/// # Arguments
+///
+/// * `conn` - A reference to the SQLite database connection.
+/// * `user_email` - The email of the user.
+///
+/// # Returns
+///
+/// A `Result` containing the user ID as an `i64` if the user is found, or an
+/// error if the user cannot be found or a database error occurs.
+pub fn get_user_id_from_email(Database { conn }: &Database, user_email: &str) -> Result<i64> {
+    let query = "
+        SELECT id FROM users WHERE email = ?;
+    ";
+    let mut statement = conn.prepare(query)?;
+    statement.query_row(params![user_email], |row| row.get(0))
+}
+
 /// Inserts a file into the database.
 ///
 /// # Arguments

@@ -53,15 +53,8 @@ enum Subcommands {
         group_id: Option<i64>,
         /// The email of the recipients to send the file to
         /// This must be specified if group_id is not
-        /// And must be specified along with ids
         #[arg(short, long, value_delimiter = ',')]
         emails: Vec<String>,
-        /// The ID of the recipients to send the file to
-        /// This must be specified if group_id is not
-        /// And must be specified along with emails
-        /// The order of the ids must match the order of the emails
-        #[arg(short, long, value_delimiter = ',')]
-        ids: Vec<i64>,
         /// Whether to use stdin as input
         #[arg(short, long)]
         stdin: bool,
@@ -151,7 +144,6 @@ fn main() {
             file,
             group_id,
             emails,
-            ids,
             stdin,
         } => {
             let (read_stream, file_name): (Box<dyn Read>, String) = if stdin {
@@ -166,13 +158,11 @@ fn main() {
                 SERVER_URL,
                 &args.email,
                 &encoded_password,
-                user_id,
                 &kp,
                 read_stream,
                 &file_name,
                 group_id,
                 emails,
-                ids,
             ) {
                 Ok(file_id) => {
                     eprintln!("Upload successful!");

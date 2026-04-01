@@ -43,6 +43,11 @@ pub struct Key {
 }
 
 #[derive(utoipa::ToSchema, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct UserEmail {
+    /// user email, guaranteed to be unique
+    pub user_email: String,
+}
+#[derive(utoipa::ToSchema, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct User {
     /// user email
     pub user_email: String,
@@ -51,10 +56,8 @@ pub struct User {
 }
 #[derive(utoipa::ToSchema, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct UserWithKey {
-    /// user email
+    /// user email, guaranteed to be unique
     pub user_email: String,
-    /// the id of the user, guaranteed to be unique
-    pub user_id: i64,
     /// Base64 encoded key
     pub key: String,
 }
@@ -67,6 +70,12 @@ pub struct UserWithKeyAndPassword {
     pub user_password_hash: String,
     /// Base64 encoded public key
     pub key: String,
+}
+
+#[derive(utoipa::ToSchema, Serialize, Deserialize, Debug)]
+pub struct GroupMembersOnlyEmail {
+    /// list of all members of the group
+    pub members: Vec<UserEmail>,
 }
 
 #[derive(utoipa::ToSchema, Serialize, Deserialize, Debug)]

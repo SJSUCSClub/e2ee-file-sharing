@@ -20,6 +20,7 @@ use tokio::sync::{
     oneshot,
 };
 use tokio_util::io::ReaderStream;
+use tower_governor::{errors::GovernorError, key_extractor::KeyExtractor};
 
 use crate::db::{self, Database};
 
@@ -167,13 +168,31 @@ pub(crate) async fn user_auth(
 }
 
 // ==============================
+// Rate Limiting
+// ==============================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UserEmailExtractor;
+
+impl KeyExtractor for UserEmailExtractor {
+    type Key = String;
+
+    fn extract<B>(&self, req: &axum::http::Request<B>) -> Result<Self::Key, GovernorError> {
+        let Query(params) =
+            Query::<UserAuth>::try_from_uri(req.uri()).map_err(|_| GovernorError::Other {
+                code: axum::http::StatusCode::UNAUTHORIZED,
+                msg: Some("Missing or invalid user auth query parameters".to_string()),
+                headers: None,
+            })?;
+
+        Ok(params.user_email)
+    }
+}
+
+// ==============================
 // FILES endpoints
 // ==============================
 
-// TODO - ideally upload and download
-// would stream data instead of just using
-// multipart/form-data because this would
-// allow easy handling of large files.
 /// List all files that the user has access to
 #[utoipa::path(
     get,
@@ -563,7 +582,7 @@ pub(crate) async fn get_user_info(
 #[derive(utoipa::IntoParams, Deserialize, Debug)]
 #[into_params(style=Form, parameter_in = Query)]
 pub(crate) struct GetUserKeyQueryParams {
-    target_user_id: i64,
+    target_user_email: String,
 }
 
 /// Get a user's public key
@@ -587,16 +606,24 @@ pub(crate) async fn get_user_key(
     State(st): State<HandlerState>,
 ) -> Response {
     // get db
-    let key = match HandlerState::run_with_db(&st, |db| db::get_user_key(db, params.target_user_id))
-    {
+    let key_result = HandlerState::run_with_db(&st, |db| {
+        db::get_user_id_from_email(db, &params.target_user_email)
+            .and_then(|id| db::get_user_key(db, id))
+    });
+
+    let key = match key_result {
         Ok(key) => key,
         Err(e) => {
-            println!("Failed to get user key with {e:?}");
+            println!(
+                "Failed to get user key for email {}: {:?}",
+                params.target_user_email, e
+            );
             return (StatusCode::BAD_REQUEST, "Failed to get user key").into_response();
         }
     };
-    let key = BASE64_STANDARD.encode(key);
-    (StatusCode::OK, Json(Key { key })).into_response()
+
+    let key_encoded = BASE64_STANDARD.encode(key);
+    (StatusCode::OK, Json(Key { key: key_encoded })).into_response()
 }
 
 /// Register a new user
@@ -735,7 +762,7 @@ pub(crate) async fn get_group_key_by_id(
     path = "/api/v1/group",
     tag = "Groups",
     responses(
-        (status=OK, body=GroupMembers, description="Group id"),
+        (status=OK, body=GroupMembersOnlyEmail, description="Group id"),
         (status=BAD_REQUEST, description="Failed to get group id"),
         (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding"),
     ),
@@ -747,36 +774,37 @@ pub(crate) async fn get_group_key_by_id(
 pub(crate) async fn get_group_by_members(
     State(st): State<HandlerState>,
     Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
-    Json(body): Json<GroupMembers>,
+    Json(body): Json<GroupMembersOnlyEmail>,
 ) -> impl IntoResponse {
     // validate that all users exist
-    let existing_users = match HandlerState::run_with_db(&st, |db| {
-        db::get_existing_users(
-            db,
+    let users_result: Result<Vec<(i64, String)>, StatusCode> =
+        HandlerState::run_with_db(&st, |db| {
             body.members
                 .iter()
-                .map(|m| (m.user_id, m.user_email.clone()))
-                .collect(),
-        )
-    }) {
-        Ok(existing_users) => existing_users,
-        Err(e) => {
-            println!("Failed to get existing users with {e:?}");
-            return (StatusCode::BAD_REQUEST, "Failed to get existing users").into_response();
-        }
+                .map(|m| {
+                    db::get_user_id_from_email(db, &m.user_email)
+                        .map(|id| (id, m.user_email.clone()))
+                        .map_err(|e| {
+                            println!("Failed to get user ID for email {}: {:?}", m.user_email, e);
+                            StatusCode::BAD_REQUEST
+                        })
+                })
+                .collect()
+        });
+
+    let users = match users_result {
+        Ok(u) => u,
+        Err(status) => return (status, "Not all users exist").into_response(),
     };
-    if existing_users.len() != body.members.len() {
-        return (StatusCode::BAD_REQUEST, "Not all users exist").into_response();
-    }
+
     // and that current user is present
-    if !existing_users.iter().any(|user| user.0 == user_id) {
+    if !users.iter().any(|(id, _)| *id == user_id) {
         return (StatusCode::UNAUTHORIZED, "User not present in group").into_response();
     }
 
     // send request to see if such a group exists
-    let group_id = match HandlerState::run_with_db(&st, |db| {
-        db::get_group_id(db, body.members.iter().map(|m| m.user_id).collect())
-    }) {
+    let user_ids: Vec<i64> = users.iter().map(|(id, _)| *id).collect();
+    let group_id = match HandlerState::run_with_db(&st, |db| db::get_group_id(db, user_ids)) {
         Ok(group_id) => group_id,
         Err(e) => {
             println!("Failed to get group by members with {e:?}");
@@ -812,34 +840,40 @@ pub(crate) async fn create_group(
     Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
     Json(body): Json<GroupMembersWithKey>,
 ) -> impl IntoResponse {
-    // validate that all users exist
-    let existing_users = match HandlerState::run_with_db(&st, |db| {
-        db::get_existing_users(
-            db,
+    // getting members
+    let resolved_members_res: Result<Vec<(i64, String, Vec<u8>)>, StatusCode> =
+        HandlerState::run_with_db(&st, |db| {
             body.members
-                .iter()
-                .map(|m| (m.user_id, m.user_email.clone()))
-                .collect(),
-        )
-    }) {
-        Ok(existing_users) => existing_users,
-        Err(e) => {
-            println!("Failed to get existing users with {e:?}");
-            return (StatusCode::BAD_REQUEST, "Failed to get existing users").into_response();
+                .into_iter()
+                .map(|m| {
+                    let id = db::get_user_id_from_email(db, &m.user_email).map_err(|e| {
+                        println!("Failed to find user by email {}: {:?}", m.user_email, e);
+                        StatusCode::BAD_REQUEST
+                    })?;
+                    let key_bytes = BASE64_STANDARD.decode(&m.key).map_err(|e| {
+                        println!("Failed to decode key for {}: {:?}", m.user_email, e);
+                        StatusCode::BAD_REQUEST
+                    })?;
+                    Ok((id, m.user_email, key_bytes))
+                })
+                .collect()
+        });
+
+    let resolved_members = match resolved_members_res {
+        Ok(m) => m,
+        Err(status) => {
+            return (status, "Not all users exist or invalid key encoding").into_response();
         }
     };
-    if existing_users.len() != body.members.len() {
-        return (StatusCode::BAD_REQUEST, "Not all users exist").into_response();
-    }
+
     // and that current user is present
-    if !existing_users.iter().any(|user| user.0 == user_id) {
+    if !resolved_members.iter().any(|(id, _, _)| *id == user_id) {
         return (StatusCode::UNAUTHORIZED, "User not present in group").into_response();
     }
 
     // check if such a group exists before creating
-    let group_id = match HandlerState::run_with_db(&st, |db| {
-        db::get_group_id(db, body.members.iter().map(|m| m.user_id).collect())
-    }) {
+    let user_ids: Vec<i64> = resolved_members.iter().map(|(id, _, _)| *id).collect();
+    let group_id = match HandlerState::run_with_db(&st, |db| db::get_group_id(db, user_ids)) {
         Ok(group_id) => group_id,
         Err(e) => {
             println!("Failed to get group by members with {e:?}");
@@ -850,14 +884,14 @@ pub(crate) async fn create_group(
         // then return 409 and the group id
         return (StatusCode::CONFLICT, Json(GroupId { group_id })).into_response();
     }
+
     // so now actually create group with the writeable db
     let (tx, rx) = oneshot::channel();
     st.tx
         .send(DatabaseCommand::CreateGroup {
-            members: body
-                .members
+            members: resolved_members
                 .into_iter()
-                .map(|m| (m.user_id, BASE64_STANDARD.decode(m.key).unwrap()))
+                .map(|(id, _, key)| (id, key))
                 .collect(),
             responder: tx,
         })
@@ -1077,6 +1111,18 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"User email and password mismatch");
+    }
+
+    #[test]
+    fn test_user_email_extractor_decodes_query_parameters() {
+        let request = Request::builder()
+            .uri("/?user_email=alice%2Esmith%40example.com&user_password_hash=dummy")
+            .body(Body::empty())
+            .unwrap();
+
+        let extracted = UserEmailExtractor.extract(&request).unwrap();
+
+        assert_eq!(extracted, "alice.smith@example.com");
     }
 
     // ==============================
@@ -1452,7 +1498,7 @@ mod tests {
 
         // try request
         let request = Request::builder()
-            .uri(format!("/?target_user_id=1&user_email=test@test.com&user_password_hash={encoded_password_hash}"))
+            .uri(format!("/?target_user_email=test2@test.com&user_email=test@test.com&user_password_hash={encoded_password_hash}"))
             .method("GET")
             .body(Body::empty())
             .unwrap();
@@ -1466,7 +1512,7 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let body: Key = serde_json::from_slice(&body).unwrap();
         let key = BASE64_STANDARD.decode(body.key).unwrap();
-        assert_eq!(key, vec![0xe0]);
+        assert_eq!(key, vec![0xef]);
     }
 
     // ==============================
@@ -1763,12 +1809,10 @@ mod tests {
         let request_body = GroupMembersWithKey {
             members: vec![
                 UserWithKey {
-                    user_id: 1,
                     user_email: "test@test.com".to_string(),
                     key: BASE64_STANDARD.encode(key.to_vec()),
                 },
                 UserWithKey {
-                    user_id: 2,
                     user_email: "test2@test.com".to_string(),
                     key: BASE64_STANDARD.encode(key2.to_vec()),
                 },
@@ -1816,13 +1860,11 @@ mod tests {
         let request_body = GroupMembersWithKey {
             members: vec![
                 UserWithKey {
-                    user_id: 1,
                     user_email: "test@test.com".to_string(),
                     key: BASE64_STANDARD.encode(key.to_vec()),
                 },
                 UserWithKey {
-                    user_id: 4,
-                    user_email: "test2@test.com".to_string(),
+                    user_email: "missing@test.com".to_string(),
                     key: BASE64_STANDARD.encode(key2.to_vec()),
                 },
             ],
@@ -1844,12 +1886,11 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(&body[..], b"Not all users exist");
+        assert_eq!(&body[..], b"Not all users exist or invalid key encoding");
 
         // try when user not present
         let request_body = GroupMembersWithKey {
             members: vec![UserWithKey {
-                user_id: 2,
                 user_email: "test2@test.com".to_string(),
                 key: BASE64_STANDARD.encode(key2.to_vec()),
             }],
