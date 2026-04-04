@@ -9,16 +9,16 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE, Engine as _};
-use corelib::server::{make_salt, salt_password};
+use base64::{prelude::{BASE64_STANDARD, BASE64_URL_SAFE, Engine as _}, write};
+use corelib::{client::file_stream_encryption::{CHUNK_SIZE, MAC_SIZE}, server::{make_salt, salt_password}};
 use models::*;
 use serde::Deserialize;
 use std::cell::RefCell;
 use std::sync::Arc;
-use tokio::sync::{
+use tokio::{fs::OpenOptions, io::AsyncWriteExt, sync::{
     mpsc::{self, Sender},
     oneshot,
-};
+}};
 use tokio_util::io::ReaderStream;
 use tower_governor::{errors::GovernorError, key_extractor::KeyExtractor};
 
@@ -347,10 +347,10 @@ pub(crate) async fn ws_file_upload(
 
     ws.on_upgrade(move |mut socket| async move {
         let mut file_name: String;
-
-        let mut path = "".to_string();
-        let mut bytes: Vec<u8> = Vec::new();
+        let mut write_file = None;
         let mut file_id: Option<i64> = None;
+
+        let mut nonce_start_buf: Option<[u8; 8]> = None;
 
         while let Some(msg_result) = socket.recv().await {
             if let Ok(msg) = msg_result {
@@ -358,28 +358,13 @@ pub(crate) async fn ws_file_upload(
                     Message::Text(text) => {
                         match text.as_str() {
                             "finish" => {
-                                if &*path == "" {
-                                    println!("Path should not be empty");
-                                    return;
-                                }
-
-                                if let Err(e) = tokio::fs::write(path, bytes).await {
-                                    println!("Failed to save file with {e:?}");
-                                    // return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to save file")
-                                    //     .into_response();
-                                    //TODO: find a way to return these responses somehow
-                                    return;
+                                if file_id.is_some() {
+                                    let file_id_bytes = file_id.unwrap().to_be_bytes().to_vec();
+                                    socket.send(Message::Binary(Bytes::from(file_id_bytes))).await.unwrap();
                                 } else {
-                                    // return (StatusCode::OK, Json(FileId { file_id })).into_response();
-                                    if file_id.is_some() {
-                                        let tmp = file_id.unwrap().to_be_bytes().to_vec();
-                                        let out: Bytes = Bytes::from(tmp);
-                                        socket.send(Message::Binary(out)).await.unwrap();
-                                    } else {
-                                        println!("File ID was invalid somehow");
-                                    }
-                                    return;
+                                    println!("File ID was invalid somehow");
                                 }
+                                return;
                             }
                             _ => {
                                 file_name = text.to_string();
@@ -402,26 +387,47 @@ pub(crate) async fn ws_file_upload(
                                     Ok(file_id) => Some(file_id),
                                     Err(e) => {
                                         println!("Failed to insert file with {e:?}");
-
                                         return;
-                                        // return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to insert file")  //TODO find a way to return these responses
-                                        //     .into_response();
                                     }
                                 };
 
                                 if file_id.is_none() {
-                                    println!("file_id is not ok");
+                                    println!("file_id is invalid");
                                 }
-                                path = to_path(&st.upload_directory, file_id.unwrap());
+                                let path = to_path(&st.upload_directory, file_id.unwrap());
                                 let _ = socket
                                     .send(Message::Text(Utf8Bytes::from("Ready for file data")))
                                     .await;
+
+                                let write_file_res = OpenOptions::new()
+                                    .append(true)
+                                    .create(true)
+                                    .open(&path)
+                                    .await;
+
+                                if write_file_res.is_ok() {
+                                    write_file = Some(write_file_res.unwrap());
+                                } else {
+                                    println!("Could not create or open file");
+                                    return;
+                                }
                             }
                         }
                     }
 
                     Message::Binary(data) => {
-                        bytes.append(&mut data.to_vec().clone());
+                        match write_file {
+                            Some(ref mut write) => {
+                                if let Err(e) = write.write_all(&data).await {
+                                    println!("Failed to save file with {e:?}");
+                                    return;
+                                }
+                            },
+                            None => {
+                                println!("Received binary message before file was created");
+                                return;
+                            }
+                        }
                     }
 
                     Message::Close(_) => {}
