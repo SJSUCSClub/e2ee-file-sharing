@@ -110,7 +110,7 @@ fn main() {
     }
 
     // retrieve kp and validate user by using email and password
-    let (kp, encoded_password, user_id) =
+    let (kp, encoded_password, _) =
         match get_user_info(SERVER_URL, &args.email, &password, disk_key_path) {
             Ok((kp, encoded_password, user_id)) => (kp, encoded_password, user_id),
             Err(e) => {

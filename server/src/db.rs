@@ -1,5 +1,5 @@
 use corelib::server::salt_password;
-use rusqlite::{Connection, Result, params, params_from_iter, types::Value};
+use rusqlite::{Connection, Result, params, types::Value};
 use std::path::Path;
 use std::rc::Rc;
 
@@ -239,38 +239,6 @@ pub fn get_group_key(Database { conn }: &Database, group_id: i64, user_id: i64) 
     ";
     let mut statement = conn.prepare(sql).unwrap();
     statement.query_row(params![group_id, user_id], |row| row.get(0))
-}
-/// Retrieves a list of all the users with the given emails/ids that exist in the database.
-///
-/// # Arguments
-///
-/// * `conn` - A reference to the SQLite database connection.
-/// * `users` - A vector of tuples, where each tuple contains the user ID and email of a user.
-///
-/// # Returns
-///
-/// A `Result` containing a vector of tuples, where each tuple contains the user ID and email of a user
-/// that exists in the database.
-pub fn get_existing_users(
-    Database { conn }: &Database,
-    users: Vec<(i64, String)>,
-) -> Result<Vec<(i64, String)>> {
-    // use a repeated statement because we can't use rarray
-    // since rarray requires Rc<Vec<Value>>, and Value is only
-    // Text, Integer, Real, or Blob. We need a tuple, so we do it ourselves
-    let mut repeated = "(?, ?),".repeat(users.len());
-    repeated.pop(); // remove the last comma
-    let sql = format!("SELECT id, email FROM users WHERE (id, email) IN ({repeated});");
-    let mut statement = conn.prepare(&sql).unwrap();
-
-    let params = users
-        .into_iter()
-        .flat_map(|u| vec![Value::Integer(u.0), Value::Text(u.1)]);
-    statement
-        .query_map(params_from_iter(params), |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?
-        .collect()
 }
 
 /// Inserts the user with the given email and password hash into the database.
@@ -624,43 +592,6 @@ mod tests {
         assert_eq!(result, vec![2u8]);
         let result = get_group_key(&db, 2, 2).unwrap();
         assert_eq!(result, vec![3u8]);
-    }
-
-    #[test]
-    fn test_get_existing_users() {
-        let db = setup_test_db();
-        db.conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00'), ('test3@test.com', X'00', X'00', X'00'), ('test4@test.com', X'00', X'00', X'00');", []).expect("Failed to insert into users");
-
-        // test with id/email mismatch
-        let result = get_existing_users(
-            &db,
-            vec![
-                (1, "test2@test.com".to_string()),
-                (2, "test3@test.com".to_string()),
-                (3, "test@test.com".to_string()),
-            ],
-        )
-        .unwrap();
-        assert_eq!(result, vec![]);
-
-        // test with proper id/email pairs
-        let result = get_existing_users(
-            &db,
-            vec![
-                (2, "test2@test.com".to_string()),
-                (3, "test3@test.com".to_string()),
-                (1, "test@test.com".to_string()),
-            ],
-        )
-        .unwrap();
-        assert_eq!(
-            result,
-            vec![
-                (2, "test2@test.com".to_string()),
-                (3, "test3@test.com".to_string()),
-                (1, "test@test.com".to_string()),
-            ]
-        );
     }
 
     #[test]

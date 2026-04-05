@@ -119,7 +119,6 @@ async fn main() {
 
     // non-limited leftover:
     let (others_app, others_openapi) = OpenApiRouter::with_openapi(ApiDoc::openapi())
-        .routes(routes!(api::upload_file))
         .routes(routes!(api::get_user_info))
         .routes(routes!(api::get_user_key))
         .routes(routes!(api::get_group_by_id))
