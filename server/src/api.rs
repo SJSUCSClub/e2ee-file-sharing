@@ -9,16 +9,20 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use base64::{prelude::{BASE64_STANDARD, BASE64_URL_SAFE, Engine as _}, write};
-use corelib::{client::file_stream_encryption::{CHUNK_SIZE, MAC_SIZE}, server::{make_salt, salt_password}};
+use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE, Engine as _};
+use corelib::server::{make_salt, salt_password};
 use models::*;
 use serde::Deserialize;
 use std::cell::RefCell;
 use std::sync::Arc;
-use tokio::{fs::OpenOptions, io::AsyncWriteExt, sync::{
-    mpsc::{self, Sender},
-    oneshot,
-}};
+use tokio::{
+    fs::OpenOptions,
+    io::AsyncWriteExt,
+    sync::{
+        mpsc::{self, Sender},
+        oneshot,
+    },
+};
 use tokio_util::io::ReaderStream;
 use tower_governor::{errors::GovernorError, key_extractor::KeyExtractor};
 
@@ -360,7 +364,10 @@ pub(crate) async fn ws_file_upload(
                             "finish" => {
                                 if file_id.is_some() {
                                     let file_id_bytes = file_id.unwrap().to_be_bytes().to_vec();
-                                    socket.send(Message::Binary(Bytes::from(file_id_bytes))).await.unwrap();
+                                    socket
+                                        .send(Message::Binary(Bytes::from(file_id_bytes)))
+                                        .await
+                                        .unwrap();
                                 } else {
                                     println!("File ID was invalid somehow");
                                 }
@@ -415,20 +422,18 @@ pub(crate) async fn ws_file_upload(
                         }
                     }
 
-                    Message::Binary(data) => {
-                        match write_file {
-                            Some(ref mut write) => {
-                                if let Err(e) = write.write_all(&data).await {
-                                    println!("Failed to save file with {e:?}");
-                                    return;
-                                }
-                            },
-                            None => {
-                                println!("Received binary message before file was created");
+                    Message::Binary(data) => match write_file {
+                        Some(ref mut write) => {
+                            if let Err(e) = write.write_all(&data).await {
+                                println!("Failed to save file with {e:?}");
                                 return;
                             }
                         }
-                    }
+                        None => {
+                            println!("Received binary message before file was created");
+                            return;
+                        }
+                    },
 
                     Message::Close(_) => {}
                     _ => {}
