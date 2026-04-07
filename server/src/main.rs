@@ -48,7 +48,11 @@ async fn main() {
     let _ = tokio::spawn(connection_task(db, rx));
 
     // make app
-    // but in three parts: upload with rate limit, auth, and unauth
+    // but in several parts:
+    // - upload with stricter limits (ws app)
+    // - general API with gentler limits (general app)
+    // - remaining auth endpoints
+    // - unauth endpoints
 
     // rate limiters for streamed file upload
     let email_config = Arc::new(
@@ -80,20 +84,52 @@ async fn main() {
         ws_app
     };
 
-    let (others_app, others_openapi) = OpenApiRouter::with_openapi(ApiDoc::openapi())
+    // rate limiters for general API requests
+    let general_email_config = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_millisecond(constants::GENERAL_RATE_LIMIT_EMAIL_REPLENISH_TIME)
+            .burst_size(30)
+            .key_extractor(api::UserEmailExtractor)
+            .finish()
+            .unwrap(),
+    );
+
+    let general_ip_config = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_millisecond(constants::GENERAL_RATE_LIMIT_IP_REPLENISH_TIME)
+            .burst_size(60)
+            .finish()
+            .unwrap(),
+    );
+
+    let (general_app, general_openapi) = OpenApiRouter::new()
         .routes(routes!(api::list_files))
         .routes(routes!(api::get_file))
-        .routes(routes!(api::upload_file))
         .routes(routes!(api::get_file_info))
+        .routes(routes!(api::list_groups))
+        .with_state(state.clone())
+        .split_for_parts();
+
+    let general_app = general_app.layer(GovernorLayer::new(general_email_config));
+    let general_app = if !dev_mode {
+        general_app.layer(GovernorLayer::new(general_ip_config))
+    } else {
+        general_app
+    };
+
+    // non-limited leftover:
+    let (others_app, others_openapi) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(api::get_user_info))
         .routes(routes!(api::get_user_key))
         .routes(routes!(api::get_group_by_id))
         .routes(routes!(api::get_group_key_by_id))
         .routes(routes!(api::get_group_by_members))
         .routes(routes!(api::create_group))
-        .routes(routes!(api::list_groups))
         .with_state(state.clone())
         .split_for_parts();
+
+    let others_app = others_app.merge(general_app);
+    let others_openapi = others_openapi.merge_from(general_openapi);
 
     // re-merge auth apps and apply user_auth to all of them
     let auth_app = others_app.merge(ws_app);
@@ -110,7 +146,7 @@ async fn main() {
         .with_state(state)
         .split_for_parts();
 
-    // merge apps together and add swagger
+    // finally merge with unauth and add swagger
     let app = auth_app.merge(unauth_app);
     let openapi = auth_openapi.merge_from(unauth_openapi);
     let app = app.merge(
@@ -129,5 +165,10 @@ async fn main() {
     let bind_addr = std::env::var("EFS_SERVER_LISTEN").unwrap_or("127.0.0.1:8091".to_string());
     println!("server starting on port {}", bind_addr);
     let listener = tokio::net::TcpListener::bind(bind_addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .unwrap();
 }

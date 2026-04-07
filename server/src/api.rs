@@ -2,7 +2,7 @@ use axum::{
     Extension, Json,
     body::{Body, Bytes},
     extract::{
-        Multipart, Path, Query, Request, State,
+        Path, Query, Request, State,
         ws::{Message, Utf8Bytes, WebSocketUpgrade},
     },
     http::{StatusCode, header},
@@ -15,9 +15,13 @@ use models::*;
 use serde::Deserialize;
 use std::cell::RefCell;
 use std::sync::Arc;
-use tokio::sync::{
-    mpsc::{self, Sender},
-    oneshot,
+use tokio::{
+    fs::OpenOptions,
+    io::AsyncWriteExt,
+    sync::{
+        mpsc::{self, Sender},
+        oneshot,
+    },
 };
 use tokio_util::io::ReaderStream;
 use tower_governor::{errors::GovernorError, key_extractor::KeyExtractor};
@@ -347,9 +351,7 @@ pub(crate) async fn ws_file_upload(
 
     ws.on_upgrade(move |mut socket| async move {
         let mut file_name: String;
-
-        let mut path = "".to_string();
-        let mut bytes: Vec<u8> = Vec::new();
+        let mut write_file = None;
         let mut file_id: Option<i64> = None;
 
         while let Some(msg_result) = socket.recv().await {
@@ -358,28 +360,16 @@ pub(crate) async fn ws_file_upload(
                     Message::Text(text) => {
                         match text.as_str() {
                             "finish" => {
-                                if &*path == "" {
-                                    println!("Path should not be empty");
-                                    return;
-                                }
-
-                                if let Err(e) = tokio::fs::write(path, bytes).await {
-                                    println!("Failed to save file with {e:?}");
-                                    // return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to save file")
-                                    //     .into_response();
-                                    //TODO: find a way to return these responses somehow
-                                    return;
+                                if file_id.is_some() {
+                                    let file_id_bytes = file_id.unwrap().to_be_bytes().to_vec();
+                                    socket
+                                        .send(Message::Binary(Bytes::from(file_id_bytes)))
+                                        .await
+                                        .unwrap();
                                 } else {
-                                    // return (StatusCode::OK, Json(FileId { file_id })).into_response();
-                                    if file_id.is_some() {
-                                        let tmp = file_id.unwrap().to_be_bytes().to_vec();
-                                        let out: Bytes = Bytes::from(tmp);
-                                        socket.send(Message::Binary(out)).await.unwrap();
-                                    } else {
-                                        println!("File ID was invalid somehow");
-                                    }
-                                    return;
+                                    println!("File ID was invalid somehow");
                                 }
+                                return;
                             }
                             _ => {
                                 file_name = text.to_string();
@@ -402,27 +392,46 @@ pub(crate) async fn ws_file_upload(
                                     Ok(file_id) => Some(file_id),
                                     Err(e) => {
                                         println!("Failed to insert file with {e:?}");
-
                                         return;
-                                        // return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to insert file")  //TODO find a way to return these responses
-                                        //     .into_response();
                                     }
                                 };
 
                                 if file_id.is_none() {
-                                    println!("file_id is not ok");
+                                    println!("file_id is invalid");
                                 }
-                                path = to_path(&st.upload_directory, file_id.unwrap());
+                                let path = to_path(&st.upload_directory, file_id.unwrap());
                                 let _ = socket
                                     .send(Message::Text(Utf8Bytes::from("Ready for file data")))
                                     .await;
+
+                                let write_file_res = OpenOptions::new()
+                                    .append(true)
+                                    .create(true)
+                                    .open(&path)
+                                    .await;
+
+                                if write_file_res.is_ok() {
+                                    write_file = Some(write_file_res.unwrap());
+                                } else {
+                                    println!("Could not create or open file");
+                                    return;
+                                }
                             }
                         }
                     }
 
-                    Message::Binary(data) => {
-                        bytes.append(&mut data.to_vec().clone());
-                    }
+                    Message::Binary(data) => match write_file {
+                        Some(ref mut write) => {
+                            if let Err(e) = write.write_all(&data).await {
+                                println!("Failed to save file with {e:?}");
+                                return;
+                            }
+                        }
+                        None => {
+                            println!("Received binary message before file was created");
+                            return;
+                        }
+                    },
 
                     Message::Close(_) => {}
                     _ => {}
@@ -430,91 +439,6 @@ pub(crate) async fn ws_file_upload(
             }
         }
     })
-}
-
-/// Upload a file
-#[utoipa::path(
-    post,
-    path = "/api/v1/file",
-    tag = "Files",
-    responses(
-        (status=OK, body=FileId, description="File id"),
-        (status=BAD_REQUEST, description="Failed to get group or user not in group"),
-        (status=INTERNAL_SERVER_ERROR, description="Failed to save file or database error"),
-        (status=UNAUTHORIZED, description="User email and password mismatch or improper base64 password encoding")
-    ),
-    params(
-        UserAuth,
-        UploadFileQueryParams
-    ),
-    request_body(content_type = "multipart/form-data", content = FileForm)
-)]
-pub(crate) async fn upload_file(
-    Query(params): Query<UploadFileQueryParams>,
-    State(st): State<HandlerState>,
-    Extension(UserAuthExtension { user_id }): Extension<UserAuthExtension>,
-    mut multipart: Multipart,
-) -> Response {
-    // check if user is in the group
-    // since this is a read, then we can use threadlocal read-only connection
-    let group = match HandlerState::run_with_db(&st, |db| db::get_group(db, params.group_id)) {
-        Ok(group) => group,
-        Err(e) => {
-            println!("Failed to get group {e:?}");
-            return (StatusCode::BAD_REQUEST, "Failed to get group").into_response();
-        }
-    };
-    if !group.iter().any(|user| user.1 == user_id) {
-        return (StatusCode::BAD_REQUEST, "User not in group").into_response();
-    }
-
-    // now actually do the writing
-    while let Some(field) = multipart.next_field().await.unwrap() {
-        let field_name = field.name();
-        match field_name {
-            Some("file") => {
-                let file_name = field.file_name().unwrap().to_string();
-                let data = field.bytes().await.unwrap();
-
-                // insert into DB
-                // first, initialize channel to connection thread
-                let (tx, rx) = oneshot::channel();
-                st.tx
-                    .send(DatabaseCommand::InsertFile {
-                        group_id: params.group_id,
-                        filename: file_name,
-                        responder: tx,
-                    })
-                    .await
-                    .unwrap();
-                // then match result
-                let file_id = match rx.await.unwrap() {
-                    Ok(file_id) => file_id,
-                    Err(e) => {
-                        println!("Failed to insert file with {e:?}");
-                        return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to insert file")
-                            .into_response();
-                    }
-                };
-
-                // write that to a file
-                // since files are uniquely identified by their file id, then we
-                // can simply save as the file id
-                // and later fetch files by their file_id
-                let path = to_path(&st.upload_directory, file_id);
-                if let Err(e) = tokio::fs::write(path, data).await {
-                    println!("Failed to save file with {e:?}");
-                    return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to save file")
-                        .into_response();
-                } else {
-                    return (StatusCode::OK, Json(FileId { file_id })).into_response();
-                }
-            }
-            // ignore other fields
-            _ => (),
-        }
-    }
-    (StatusCode::BAD_REQUEST, "No file body provided").into_response()
 }
 
 /// Get file info (file name, file id, group name, group id)
@@ -1018,7 +942,7 @@ mod tests {
         db::init_db(&mut db).unwrap();
 
         // Extra SQLite connection for inspecting and manipulating database contents by the test code
-        let mut db_for_test_harness = Database::open(&db_path).unwrap();
+        let db_for_test_harness = Database::open(&db_path).unwrap();
 
         let (tx, rx) = mpsc::channel(32);
         tokio::spawn(connection_task(db, rx));
@@ -1298,88 +1222,6 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"SECOND FILE");
-    }
-
-    struct TestUploadFileCleaner {}
-    impl Drop for TestUploadFileCleaner {
-        fn drop(&mut self) {
-            fs::remove_dir_all("/tmp/upload-e2e-test-upload").unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn test_upload_file() {
-        // setup
-        let _cleaner = TestUploadFileCleaner {};
-        let upload_directory = "/tmp/upload-e2e-test-upload";
-        let (db, state) = setup_http_server(upload_directory);
-        tokio::fs::create_dir_all(upload_directory).await.unwrap();
-        // and add an initial user and such
-        let salt = make_salt();
-        let user_password_hash = vec![3u8, 15u8, 2u8, 10u8, 3u8, 3u8];
-        let server_password_hash = salt_password(&user_password_hash, &salt);
-        let encoded_password_hash = BASE64_URL_SAFE.encode(&user_password_hash);
-        db.conn.execute("INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test@test.com', ?, ?, X'00');", params![server_password_hash, salt]).unwrap();
-        // add group and add dummy user
-        db.conn.execute_batch("
-            INSERT INTO users (email, password_hash, salt, pk_pub) VALUES ('test2@test.com', X'00', X'00', X'00');
-            INSERT INTO groups (id) VALUES (NULL), (NULL);
-            INSERT INTO groups_user_junction (group_id, user_id, name, encrypted_key) VALUES (1, 1, 'group_name', X'00'), (2, 2, 'second', X'00');
-        ").unwrap();
-
-        // build app
-        let mut app = Router::new()
-            .route("/", authenticated(&state, post(upload_file)))
-            .with_state(state);
-
-        // try properly authenticated request
-        // make request body
-        let data = "--MYBOUNDARY\r\nContent-Disposition: form-data; name=\"file\"; filename=\"test.txt\"\r\nContent-Type: text/plain\r\n\r\nHELLO WORLD\r\n--MYBOUNDARY\r\n";
-        let request = Request::builder()
-            .uri(format!(
-                "/?user_email=test@test.com&user_password_hash={encoded_password_hash}&group_id=1"
-            ))
-            .method("POST")
-            .header(
-                header::CONTENT_TYPE,
-                format!("multipart/form-data; boundary={}", "MYBOUNDARY"),
-            )
-            .body(Body::from(data))
-            .unwrap();
-        let response = ServiceExt::<Request<Body>>::ready(&mut app)
-            .await
-            .unwrap()
-            .call(request)
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let body: FileId = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body.file_id, 1);
-        let contents = tokio::fs::read_to_string(to_path(upload_directory, 1))
-            .await
-            .unwrap();
-        assert_eq!(contents, "HELLO WORLD");
-
-        // and try request to group id that user is not a part of
-        let request = Request::builder()
-            .uri(format!(
-                "/?user_email=test@test.com&user_password_hash={encoded_password_hash}&group_id=2"
-            ))
-            .method("POST")
-            .header(
-                header::CONTENT_TYPE,
-                format!("multipart/form-data; boundary={}", "MYBOUNDARY"),
-            )
-            .body(Body::from(data))
-            .unwrap();
-        let response = ServiceExt::<Request<Body>>::ready(&mut app)
-            .await
-            .unwrap()
-            .call(request)
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -1937,7 +1779,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_user() {
-        let (db, state) = setup_http_server("");
+        let (_, state) = setup_http_server("");
 
         // initialize app
         // build app
