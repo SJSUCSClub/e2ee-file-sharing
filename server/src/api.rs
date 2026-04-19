@@ -374,6 +374,45 @@ pub(crate) async fn ws_file_upload(
                             _ => {
                                 file_name = text.to_string();
 
+                                // check if file already exists in group
+                                let mut file_exists = match HandlerState::run_with_db(&st, |db| {
+                                    db::check_file_exists_in_group(db, params.group_id, &file_name)
+                                }) {
+                                    Ok(exists) => exists,
+                                    Err(e) => {
+                                        println!("Failed to query db for existing file with {e:?}");
+                                        return;
+                                    }
+                                };
+
+                                // split the filename into base and extension
+                                let (base_name, ext) = match file_name.rsplit_once('.') {
+                                    Some((base, e)) => (base, format!(".{}", e)),
+                                    None => (file_name.as_str(), String::new()),
+                                };
+
+                                let mut current_check_name = file_name.clone();
+                                let mut file_number = 1;
+
+                                while file_exists {
+                                    // make the new name to check
+                                    current_check_name = format!("{} ({}){}", base_name, file_number, ext);
+
+                                    file_exists = match HandlerState::run_with_db(&st, |db| {
+                                        db::check_file_exists_in_group(db, params.group_id, &current_check_name)
+                                    }) {
+                                        Ok(exists) => exists,
+                                        Err(e) => {
+                                            println!("Failed to query db for existing file with {e:?}");
+                                            return;
+                                        }
+                                    };
+
+                                    file_number += 1;
+                                }
+                                // update the actual file_name
+                                file_name = current_check_name;
+
                                 // insert into DB
                                 // first, initialize channel to connection thread
                                 let (tx, rx) = oneshot::channel();
