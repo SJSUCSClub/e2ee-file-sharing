@@ -396,14 +396,21 @@ pub(crate) async fn ws_file_upload(
 
                                 while file_exists {
                                     // make the new name to check
-                                    current_check_name = format!("{} ({}){}", base_name, file_number, ext);
+                                    current_check_name =
+                                        format!("{} ({}){}", base_name, file_number, ext);
 
                                     file_exists = match HandlerState::run_with_db(&st, |db| {
-                                        db::check_file_exists_in_group(db, params.group_id, &current_check_name)
+                                        db::check_file_exists_in_group(
+                                            db,
+                                            params.group_id,
+                                            &current_check_name,
+                                        )
                                     }) {
                                         Ok(exists) => exists,
                                         Err(e) => {
-                                            println!("Failed to query db for existing file with {e:?}");
+                                            println!(
+                                                "Failed to query db for existing file with {e:?}"
+                                            );
                                             return;
                                         }
                                     };

@@ -192,7 +192,11 @@ pub fn get_user_id_from_email(Database { conn }: &Database, user_email: &str) ->
 /// # Returns
 ///
 /// A `Result` containing a boolean indicating if the file exists.
-pub fn check_file_exists_in_group(Database { conn }: &Database, group_id: i64, filename: &str) -> Result<bool> {
+pub fn check_file_exists_in_group(
+    Database { conn }: &Database,
+    group_id: i64,
+    filename: &str,
+) -> Result<bool> {
     let query = "SELECT EXISTS(SELECT 1 FROM files WHERE group_id = ? AND filename = ? LIMIT 1);";
     let mut statement = conn.prepare(query)?;
     statement.query_row(params![group_id, filename], |row| row.get(0))
