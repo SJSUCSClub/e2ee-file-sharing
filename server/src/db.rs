@@ -203,7 +203,7 @@ pub fn check_file_exists_in_group(
 }
 
 /// Retrieves filenames in a group that begin with the given base string.
-/// 
+///
 /// # Arguments
 ///
 /// * `conn` - A reference to the SQLite database connection.
@@ -223,8 +223,10 @@ pub fn get_similar_filenames(
     let pattern = format!("{}%{}", base_name, ext);
     let query = "SELECT filename FROM files WHERE group_id = ? AND filename LIKE ?";
     let mut statement = conn.prepare(query)?;
-    let filenames = statement.query_map(params![group_id, pattern], |row| row.get::<usize, String>(0))?;
-    
+    let filenames = statement.query_map(params![group_id, pattern], |row| {
+        row.get::<usize, String>(0)
+    })?;
+
     let mut result = Vec::new();
     for name in filenames {
         result.push(name?);

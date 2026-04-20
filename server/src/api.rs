@@ -393,12 +393,15 @@ pub(crate) async fn ws_file_upload(
                                 if similar_names.contains(&file_name) {
                                     let mut max_num = 0;
                                     for similar in similar_names {
-                                        if similar.starts_with(base_name) && similar.ends_with(&ext) {
+                                        if similar.starts_with(base_name) && similar.ends_with(&ext)
+                                        {
                                             let prefix_len = base_name.len();
                                             let suffix_len = ext.len();
                                             if similar.len() > prefix_len + suffix_len {
-                                                let middle = &similar[prefix_len..(similar.len() - suffix_len)];
-                                                if middle.starts_with(" (") && middle.ends_with(")") {
+                                                let middle = &similar
+                                                    [prefix_len..(similar.len() - suffix_len)];
+                                                if middle.starts_with(" (") && middle.ends_with(")")
+                                                {
                                                     let num_str = &middle[2..middle.len() - 1];
                                                     if let Ok(num) = num_str.parse::<u32>() {
                                                         // set max num if this name has a higher number
