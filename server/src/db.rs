@@ -202,6 +202,36 @@ pub fn check_file_exists_in_group(
     statement.query_row(params![group_id, filename], |row| row.get(0))
 }
 
+/// Retrieves filenames in a group that begin with the given base string.
+/// 
+/// # Arguments
+///
+/// * `conn` - A reference to the SQLite database connection.
+/// * `group_id` - The ID of the group.
+/// * `base_name` - The name of the file to check, before the extension.
+///  * `ext` - The file extension part of the file name.
+///
+/// # Returns
+///
+/// A `Result` containing a list of existing similar file names in the group
+pub fn get_similar_filenames(
+    Database { conn }: &Database,
+    group_id: i64,
+    base_name: &str,
+    ext: &str,
+) -> Result<Vec<String>> {
+    let pattern = format!("{}%{}", base_name, ext);
+    let query = "SELECT filename FROM files WHERE group_id = ? AND filename LIKE ?";
+    let mut statement = conn.prepare(query)?;
+    let filenames = statement.query_map(params![group_id, pattern], |row| row.get::<usize, String>(0))?;
+    
+    let mut result = Vec::new();
+    for name in filenames {
+        result.push(name?);
+    }
+    Ok(result)
+}
+
 /// Inserts a file into the database.
 ///
 /// # Arguments
