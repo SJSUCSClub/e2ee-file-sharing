@@ -202,7 +202,7 @@ pub fn check_file_exists_in_group(
     statement.query_row(params![group_id, filename], |row| row.get(0))
 }
 
-/// Retrieves filenames in a group that begin with the given base string.
+/// Retrieves filenames in a group that pattern match with the `base_name` and ending `ext`.
 ///
 /// # Arguments
 ///
@@ -213,7 +213,7 @@ pub fn check_file_exists_in_group(
 ///
 /// # Returns
 ///
-/// A `Result` containing a list of existing similar file names in the group
+/// A `Result` containing a list of existing similar file names in the group.
 pub fn get_similar_filenames(
     Database { conn }: &Database,
     group_id: i64,
