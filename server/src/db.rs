@@ -181,27 +181,6 @@ pub fn get_user_id_from_email(Database { conn }: &Database, user_email: &str) ->
     statement.query_row(params![user_email], |row| row.get(0))
 }
 
-/// Checks if a file with the given name already exists in the given group.
-///
-/// # Arguments
-///
-/// * `conn` - A reference to the SQLite database connection.
-/// * `group_id` - The ID of the group.
-/// * `filename` - The name of the file to check.
-///
-/// # Returns
-///
-/// A `Result` containing a boolean indicating if the file exists.
-pub fn check_file_exists_in_group(
-    Database { conn }: &Database,
-    group_id: i64,
-    filename: &str,
-) -> Result<bool> {
-    let query = "SELECT EXISTS(SELECT 1 FROM files WHERE group_id = ? AND filename = ? LIMIT 1);";
-    let mut statement = conn.prepare(query)?;
-    statement.query_row(params![group_id, filename], |row| row.get(0))
-}
-
 /// Retrieves filenames in a group that pattern match with the `base_name` and ending `ext`.
 ///
 /// # Arguments
