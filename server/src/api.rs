@@ -374,6 +374,47 @@ pub(crate) async fn ws_file_upload(
                             _ => {
                                 file_name = text.to_string();
 
+                                // split the filename into base and extension
+                                let (base_name, ext) = match file_name.rsplit_once('.') {
+                                    Some((base, e)) => (base, format!(".{}", e)),
+                                    None => (file_name.as_str(), String::new()),
+                                };
+
+                                let similar_names = match HandlerState::run_with_db(&st, |db| {
+                                    db::get_similar_filenames(db, params.group_id, base_name, &ext)
+                                }) {
+                                    Ok(files) => files,
+                                    Err(e) => {
+                                        println!("Failed to query db for similar files with {e:?}");
+                                        return;
+                                    }
+                                };
+
+                                if similar_names.contains(&file_name) {
+                                    let mut max_num = 0;
+                                    for similar in similar_names {
+                                        if similar.starts_with(base_name) && similar.ends_with(&ext)
+                                        {
+                                            let prefix_len = base_name.len();
+                                            let suffix_len = ext.len();
+                                            if similar.len() > prefix_len + suffix_len {
+                                                let middle = &similar
+                                                    [prefix_len..(similar.len() - suffix_len)];
+                                                if middle.starts_with(" (") && middle.ends_with(")")
+                                                {
+                                                    let num_str = &middle[2..middle.len() - 1];
+                                                    if let Ok(num) = num_str.parse::<u32>() {
+                                                        // set max num if this name has a higher number
+                                                        max_num = max_num.max(num);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // put the max number in the file name
+                                    file_name = format!("{} ({}){}", base_name, max_num + 1, ext);
+                                }
+
                                 // insert into DB
                                 // first, initialize channel to connection thread
                                 let (tx, rx) = oneshot::channel();
